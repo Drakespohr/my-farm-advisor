@@ -1,0 +1,3 @@
+# Field Mapping Interpretation
+
+The satellite maps display real agricultural field boundaries derived from OpenStreetMap farmland data for 5 fields in Nebraska. Each field boundary is overlaid with soil texture data (silt loam shown in tan, silty clay loam shown in sienna) based on the actual geographic location of each field polygon. Four of the five fields have hydrologic Group B soils (moderate infiltration, lower runoff risk), while one field has Group C soil requiring more drainage management. Drainage ranges from well-drained (allowing early planting) to somewhat poorly drained (higher water retention, potential ponding risk), with land capability classes of 2-3 indicating moderate to good cropping potential with appropriate conservation practices.
