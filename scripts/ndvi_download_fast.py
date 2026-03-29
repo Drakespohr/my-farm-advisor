@@ -21,7 +21,7 @@ SENTINEL_CLOUD_CLASSES = {3, 8, 9, 10, 11}
 
 
 def growing_season_range(year: int) -> str:
-    return f"{year}-03-01T00:00:00Z/{year}-10-31T23:59:59Z"
+    return f"{year}-07-01T00:00:00Z/{year}-07-31T23:59:59Z"
 
 
 def get_bbox(geometry) -> tuple:
@@ -90,16 +90,58 @@ def compute_ndvi(red_path: Path, nir_path: Path, output_path: Path) -> Path:
 
 
 def create_ndvi_map(ndvi_path: Path, field_geometry, field_id: str, output_path: Path, field_info: dict, stats: dict):
+    import contextily as ctx
+    from rasterio.warp import calculate_default_transform, reproject
+
     with rasterio.open(ndvi_path) as src:
         ndvi = src.read(1)
-        ndvi_small = ndvi[::max(1, ndvi.shape[0]//200), ::max(1, ndvi.shape[1]//200)]
-        ndvi_masked = np.ma.masked_invalid(ndvi_small)
+        src_crs = src.crs
+        src_transform = src.transform
+        src_width = src.width
+        src_height = src.height
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-    im = ax.imshow(ndvi_masked, cmap='RdYlGn', vmin=-0.2, vmax=1.0)
+    ndvi_masked = np.ma.masked_invalid(ndvi)
 
-    field_gdf = gpd.GeoSeries([field_geometry], crs="EPSG:4326")
-    field_gdf.plot(ax=ax, edgecolor='black', linewidth=2, facecolor='none')
+    field_gdf_4326 = gpd.GeoSeries([field_geometry], crs="EPSG:4326")
+    
+    fig, ax = plt.subplots(1, 1, figsize=(14, 12))
+    
+    try:
+        transform, width, height = calculate_default_transform(
+            src_crs, "EPSG:3857", src_width, src_height, *src.bounds
+        )
+        
+        ndvi_3857 = np.zeros((height, width), dtype=np.float32)
+        reproject(
+            source=ndvi_masked.filled(np.nan),
+            destination=ndvi_3857,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=transform,
+            dst_crs="EPSG:3857",
+            resampling=Resampling.bilinear
+        )
+        
+        ndvi_3857 = np.ma.masked_invalid(ndvi_3857)
+        
+        bounds_3857 = transform * (width, height)
+        
+        ax.set_xlim(bounds_3857[0], transform[0])
+        ax.set_ylim(transform[3], bounds_3857[1])
+        
+        ctx.add_basemap(ax, source=ctx.providers.Esri.WorldImagery, zoom=16)
+        
+        ax.imshow(ndvi_3857, cmap='RdYlGn', vmin=-0.2, vmax=1.0, 
+                  extent=[transform[0], transform[0] + transform[1] * width,
+                          transform[3] + transform[4] * height, transform[3]],
+                  origin='upper', alpha=0.5)
+        
+    except Exception as e:
+        print(f"Warning: Could not add satellite basemap: {e}")
+        ax.imshow(ndvi_masked, cmap='RdYlGn', vmin=-0.2, vmax=1.0)
+    
+    field_gdf_3857 = field_gdf_4326.to_crs("EPSG:3857")
+    field_gdf_3857.plot(ax=ax, edgecolor='yellow', linewidth=3, facecolor='none')
 
     soil = field_info.get('soil_series', 'Unknown')
     texture = field_info.get('surface_texture', 'Unknown')
@@ -107,13 +149,17 @@ def create_ndvi_map(ndvi_path: Path, field_geometry, field_id: str, output_path:
 
     label = f"{field_id}\n{soil} {texture}\n{acres:.1f} ac\nMean NDVI: {stats['mean_ndvi']:.3f}"
     ax.annotate(label, (0.5, 0.95), ha='center', va='top', transform=ax.transAxes,
-                fontsize=10, fontweight='bold', color='black',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                fontsize=11, fontweight='bold', color='white',
+                bbox=dict(boxstyle='round', facecolor='black', alpha=0.8))
 
-    plt.colorbar(im, ax=ax, label='NDVI', fraction=0.046, pad=0.04)
-    ax.set_title(f'NDVI Analysis - {field_id}', fontsize=14, fontweight='bold')
-    ax.set_xlabel('Pixel Column')
-    ax.set_ylabel('Pixel Row')
+    sm = plt.cm.ScalarMappable(cmap='RdYlGn', norm=plt.Normalize(vmin=-0.2, vmax=1.0))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, label='NDVI', fraction=0.03, pad=0.02)
+    
+    ax.set_title(f'NDVI Analysis - {field_id}\nSentinel-2 Satellite Imagery with NDVI Overlay', 
+                 fontsize=14, fontweight='bold')
+    ax.set_xlabel('Easting (m)')
+    ax.set_ylabel('Northing (m)')
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150, bbox_inches='tight')

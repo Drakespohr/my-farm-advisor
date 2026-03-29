@@ -96,6 +96,11 @@ NDVI values range from -1 to +1:
 | `field_003_ndvi_map.png` | NDVI visualization for field_003 |
 | `field_004_ndvi_map.png` | NDVI visualization for field_004 |
 | `field_005_ndvi_map.png` | NDVI visualization for field_005 |
+| `field_001_ndvi_satellite.png` | NDVI overlay on satellite for field_001 |
+| `field_002_ndvi_satellite.png` | NDVI overlay on satellite for field_002 |
+| `field_003_ndvi_satellite.png` | NDVI overlay on satellite for field_003 |
+| `field_004_ndvi_satellite.png` | NDVI overlay on satellite for field_004 |
+| `field_005_ndvi_satellite.png` | NDVI overlay on satellite for field_005 |
 
 ---
 

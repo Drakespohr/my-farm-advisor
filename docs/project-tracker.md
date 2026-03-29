@@ -204,5 +204,348 @@ plt.savefig('data/field_001_satellite_map_v2.png', dpi=150, bbox_inches='tight')
 
 ---
 
+## Assignment 05: NDVI Analysis
+
+### Objective
+Analyze satellite imagery to measure vegetation health using NDVI for 5 agricultural fields.
+
+### Data Source
+- **Satellite**: Sentinel-2 (European Space Agency)
+- **Provider**: Microsoft Planetary Computer STAC API
+- **Collection**: sentinel-2-l2a
+- **Date**: July 27, 2025 (peak growing season)
+- **Cloud Cover**: <30% (selected scenes ~2%)
+
+### NDVI Formula
+```
+NDVI = (NIR - Red) / (NIR + Red)
+```
+
+### Workflow
+
+#### Step 1: Download July 2025 Imagery
+- Query Planetary Computer for each field's bounding box
+- Filter scenes by cloud cover <30%
+- Download NIR (Band 8) and Red (Band 4) bands
+- Clip to field boundaries
+
+#### Step 2: Compute NDVI
+- Apply NDVI formula: (B08 - B04) / (B08 + B04)
+
+#### Step 3: Create Visualizations
+- NDVI composite maps with satellite basemap
+- NIR grayscale maps
+- NIR false color composite maps
+
+#### Step 4: Fix Boundary Artifacts
+- Tested 4 options to remove red pixels outside field boundaries
+- Applied asymmetric shrink (5% E/W, 2% N/S) - this worked best
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| scripts/download_july.py | Downloads July 2025 NDVI data |
+| scripts/ndvi_composite.py | NDVI composite maps |
+| scripts/nir_map.py | NIR grayscale/false color |
+| scripts/ndvi_options.py | Tests boundary fix options |
+
+### NDVI Statistics (July 2025)
+
+| Field | Mean NDVI | Min | Max | Soil Series |
+|-------|-----------|-----|-----|-------------|
+| field_001 | 0.658 | 0.304 | 0.722 | Ely Silt loam |
+| field_002 | 0.647 | 0.385 | 0.720 | Colo Silty clay loam |
+| field_003 | 0.707 | 0.296 | 0.729 | Ely Silt loam |
+| field_004 | 0.628 | 0.335 | 0.716 | Kennebec Silt loam |
+| field_005 | 0.632 | 0.452 | 0.657 | Kennebec Silt loam |
+
+### Output Files
+
+#### NDVI Composite Maps
+| File | Description |
+|------|-------------|
+| data/field_001_ndvi_composite.png | Field 001 NDVI with satellite basemap |
+| data/field_002_ndvi_composite.png | Field 002 NDVI with satellite basemap |
+| data/field_003_ndvi_composite.png | Field 003 NDVI with satellite basemap |
+| data/field_004_ndvi_composite.png | Field 004 NDVI with satellite basemap |
+| data/field_005_ndvi_composite.png | Field 005 NDVI with satellite basemap |
+
+#### NIR Maps
+| File | Description |
+|------|-------------|
+| data/field_001_nir_grayscale.png | NIR band (grayscale) |
+| data/field_001_nir_falsecolor.png | False color composite |
+| data/field_004_nir_grayscale.png | NIR band (grayscale) |
+| data/field_004_nir_falsecolor.png | False color composite |
+| (and similar for fields 002, 003, 005) |
+
+#### Statistics
+| File | Description |
+|------|-------------|
+| data/ndvi_july_stats.csv | July 2025 NDVI statistics |
+
+### Cloud Processing
+- **Scene Filtering**: <30% cloud cover via STAC query
+- **Pixel-Level Masking**: Deferred (SCL band not downloaded)
+
+### Key Learnings
+
+1. **July vs March/October**: July data shows healthy crops (NDVI ~0.65), March/October showed bare soil (NDVI ~0.12)
+
+2. **Boundary artifacts**: Bilinear interpolation pulls outside pixels; asymmetric shrink (5%E/W, 2%N/S) fixes this
+
+3. **False color NIR**: Healthy vegetation appears red - standard agronomy visualization
+
+### Documentation Files
+
+| File | Description |
+|------|-------------|
+| docs/assignment-05-ndvi.md | Complete methodology |
+| reports/assignment-05-walkthrough.md | Classroom-readable summary |
+
+---
+
+## Assignment 06: Weather Data Acquisition
+
+### Objective
+Retrieve historical weather data from NASA POWER for the 5 Nebraska fields.
+
+### Data Source
+- **Provider**: NASA POWER (Prediction of Worldwide Energy Resources)
+- **API**: `https://power.larc.nasa.gov/api/temporal/daily/point`
+- **Date Range**: January 1 - December 31, 2025
+- **Resolution**: 0.5° grid (~55km)
+
+### Parameters Retrieved
+- T2M (mean temperature)
+- T2M_MAX (maximum temperature)
+- T2M_MIN (minimum temperature)
+- PRECTOTCORR (precipitation)
+- ALLSKY_SFC_SW_DWN (solar radiation)
+- RH2M (humidity)
+- WS10M (wind speed)
+
+### Workflow
+
+#### Step 1: Download Weather Data
+- Query NASA POWER API for each field centroid
+- Download daily data for 2025 (365 days per field)
+- Save to CSV
+
+#### Step 2: Calculate GDD
+- Base temperature: 10°C (corn)
+- Cap temperature: 30°C
+- Formula: GDD = max(0, min(T_avg, 30) - 10)
+
+#### Step 3: Create Visualizations
+- Temperature time series
+- GDD accumulation curves
+- Precipitation charts
+
+### Key Results
+
+| Field | Avg Temp (°C) | Total Precip (mm) | Total GDD |
+|-------|---------------|-------------------|-----------|
+| field_001 | 20.76 | 620.49 | 2253.73 |
+| field_002 | 20.76 | 620.49 | 2253.73 |
+| field_003 | 20.76 | 620.49 | 2253.73 |
+| field_004 | 20.76 | 620.49 | 2253.73 |
+| field_005 | 20.76 | 620.49 | 2253.73 |
+
+### Key Finding: Spatial Resolution
+NASA POWER data is at 0.5° resolution (~55km grid). All 5 fields fall within the same grid cell, so they share identical weather data. This is a known limitation.
+
+---
+
+## Key Findings: 2025 Weather Trends
+
+### Most Significant Weather Trend
+
+**2025 Growing Season was 40% wetter than the 25-year historical average**
+
+| Metric | 2025 | Historical Avg (2000-2024) | Difference |
+|--------|------|---------------------------|------------|
+| Total Precipitation | 16.2 inches | 11.6 inches | **+40%** |
+| July Precipitation | 6.6 inches | 3.2 inches | **+103%** |
+| Avg High Temperature | 87.1°F | 87.9°F | -0.8°F (slightly cooler) |
+| Avg Low Temperature | 67.1°F | 65.4°F | +1.7°F (warmer nights) |
+| Total GDD | 2,331 | 2,296 | +35 (+2%) |
+
+### Key Observations
+
+1. **Precipitation was the most significant deviation from historical norms**
+   - July 2025 was exceptionally wet: 103% above historical average
+   - August also saw elevated precipitation: 11% above average
+
+2. **Temperature pattern was counter-intuitive**
+   - Daytime highs were slightly cooler than average (-0.8°F)
+   - Nighttime lows were warmer than average (+1.7°F)
+   - Despite cooler days, GDD was nearly identical to historical (+2%)
+
+3. **Despite the wet conditions, heat accumulation was comparable to historical**
+   - Warmer nights compensated for cooler daytime temperatures
+
+---
+
+## Data Quality Notes
+
+### Data Limitations
+
+| Issue | Description | Impact | Resolution |
+|-------|-------------|--------|------------|
+| **NASA POWER Resolution** | 0.5° grid (~55km) | All 5 fields share identical data | Documented as limitation; use single field for analysis |
+| **Initial Precipitation Bug** | Calculated data summed all 5 fields instead of one | Inflated precipitation values (5x too high) | Fixed by filtering to field_001 only |
+
+### Data Handling
+
+- Used field_001 as representative field for all calculations (since all fields identical)
+- Converted temperature from Celsius to Fahrenheit for visualizations
+- Converted precipitation from mm to inches for easier interpretation
+- Calculated rolling 7-day averages for trend analysis
+
+---
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| scripts/weather_download.py | Download NASA POWER data |
+| scripts/weather_analysis.py | Calculate GDD and create visualizations |
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| data/weather_5fields_2025.csv | Daily weather (1825 rows) |
+| data/weather_5fields_2025_june_aug.csv | June-August 2025 data |
+| data/weather_daily_growing_season.csv | Daily data with imperial units |
+| data/weather_7day_averages.csv | Rolling 7-day averages |
+| data/weather_comparison_weekly.csv | 2025 vs historical comparison |
+| data/weather_historical_2000_2024.csv | Historical data (25 years) |
+
+### Visualization Files
+
+| File | Description |
+|------|-------------|
+| data/weather_comparison_high_temp.png | High temperature time series |
+| data/weather_comparison_low_temp.png | Low temperature time series |
+| data/weather_comparison_gdd.png | GDD comparison |
+| data/weather_comparison_precipitation_monthly.png | Monthly precipitation (corrected) |
+| data/gdd_2025_weekly.png | 2025 weekly GDD |
+| data/gdd_historical_weekly.png | Historical weekly GDD |
+| data/gdd_difference_weekly.png | GDD difference chart |
+| data/gdd_cumulative_comparison.png | Cumulative GDD comparison |
+| output/dashboard-assets/weather_comparison_summary_temperature.png | Dashboard: Temperature summary |
+| output/dashboard-assets/weather_comparison_precipitation_monthly.png | Dashboard: Precipitation |
+| output/dashboard-assets/weather_comparison_gdd.png | Dashboard: GDD |
+
+### Documentation Files
+
+| File | Description |
+|------|-------------|
+| docs/assignment-06-weather.md | Complete methodology |
+| docs/weather-anomaly-august-2025.md | Significant weather anomaly analysis |
+
+### Anomaly Analysis
+
+| File | Description |
+|------|-------------|
+| data/weather_anomaly_precipitation.png | Visualization of precipitation anomaly |
+| output/dashboard-assets/weather_anomaly_precipitation.png | Dashboard-ready anomaly chart |
+
+**Key Finding:** Early August 2025 had 3.1-3.4x normal precipitation - the most significant anomaly of the growing season.
+
+---
+
+## Assignment 07: Spatial Data Integration
+
+### Objective
+Integrate multiple spatial data sources (field boundaries, soil data, weather data, NDVI satellite imagery) to create comprehensive field maps for 5 Nebraska agricultural fields.
+
+### Data Sources
+
+| Source | Description | Format |
+|--------|-------------|--------|
+| Field Boundaries | GeoJSON from OpenStreetMap | EPSG:4326 (lat/lon) |
+| Soil Data | NRCS soil database via SSURGO | CSV |
+| Weather Data | NASA POWER | CSV (0.5° resolution) |
+| NDVI | Sentinel-2 satellite imagery | GeoTIFF (EPSG:32614 UTM) |
+
+### Key Technical Details
+
+#### Coordinate System Handling
+- NDVI rasters: EPSG:32614 (UTM Zone 14N)
+- Field boundaries: EPSG:4326 (lat/lon)
+- Reprojection required for plotting with contextily basemaps
+
+#### NDVI Clipping Process
+1. Reproject field boundary from lat/lon to UTM
+2. Create boundary mask from reprojected geometry
+3. Apply mask AFTER reprojection to prevent overflow beyond field borders
+4. Custom numpy function fills NaN holes (scipy unavailable)
+
+#### Weather Data Note
+- NASA POWER has 0.5° resolution (~55km grid)
+- All 5 Nebraska fields fall within the same grid cell
+- Weather data is identical for all fields
+- Weekly averages calculated for July 1-7, 2025
+
+### Field Map Components
+- Esri World Imagery satellite base layer
+- NDVI overlay clipped to exact field boundaries
+- Soil-type colored borders
+- Info box with weather data (weekly averages for July 1-7, 2025)
+- Legend showing soil type and NDVI mean
+
+### NDVI Statistics (July 2025)
+
+| Field | Mean NDVI | Soil Series | Area (acres) |
+|-------|-----------|-------------|--------------|
+| field_001 | 0.658 | Ely Silt loam | 322.5 |
+| field_002 | 0.647 | Colo Silty clay loam | 146.7 |
+| field_003 | 0.707 | Colo Silty clay loam | 102.7 |
+| field_004 | 0.628 | Kennebec Silt loam | 290.6 |
+| field_005 | 0.632 | Kennebec Silt loam | 70.7 |
+
+### Key Findings
+1. **Weather is uniform**: All fields share identical NASA POWER data due to coarse resolution
+2. **NDVI range**: 0.628 - 0.707 indicates healthy vegetation across all fields
+3. **Soil types**: Ely, Colo, and Kennebec series with silt loam and silty clay loam textures
+4. **Field sizes**: Range from 70.7 to 322.5 acres
+
+### Output Files
+
+#### Integrated Data
+| File | Description |
+|------|-------------|
+| data/integrated_spatial_data.csv | Combined tabular data |
+| data/integrated_spatial_data.geojson | Combined spatial data for GIS |
+
+#### Field Maps
+| File | Description |
+|------|-------------|
+| output/dashboard-assets/field_map_field_001.png | Field 001 with satellite, NDVI, weather |
+| output/dashboard-assets/field_map_field_002.png | Field 002 with satellite, NDVI, weather |
+| output/dashboard-assets/field_map_field_003.png | Field 003 with satellite, NDVI, weather |
+| output/dashboard-assets/field_map_field_004.png | Field 004 with satellite, NDVI, weather |
+| output/dashboard-assets/field_map_field_005.png | Field 005 with satellite, NDVI, weather |
+
+#### Visualizations
+| File | Description |
+|------|-------------|
+| data/spatial_integration_overview.png | Multi-panel overview (soil, NDVI, size, productivity) |
+| data/soil_ndvi_correlation.png | Soil-vegetation analysis |
+
+### Documentation Files
+
+| File | Description |
+|------|-------------|
+| notebooks/07_spatial_integration.ipynb | Complete analysis notebook |
+| reports/assignment-07-walkthrough.md | Classroom-readable summary |
+
+---
+
 *Document Created: 2026-03-27*  
-*Branch: feature-assignment-04-mapping*
+*Last Updated: 2026-03-29*  
+*Branch: feature-assignment-07-spatial-integration*

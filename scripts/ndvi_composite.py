@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate NDVI field fill with satellite background - NDVI inside boundary, satellite outside."""
+"""Generate NDVI field fill - REVERTED: full coverage inside boundary (may have small corner artifacts)."""
 
 import matplotlib
 matplotlib.use('Agg')
@@ -8,17 +8,18 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 import contextily as ctx
-from rasterio.mask import mask
-from rasterio.warp import transform_bounds
+from rasterio.mask import mask as raster_mask
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
+import rasterio.transform
 
 
 def create_composite_map(field_id: str, mean_ndvi: float, soil: str, texture: str, acres: float):
-    """Create map with NDVI inside field, satellite outside."""
+    """Create map with full NDVI coverage inside field."""
     
-    ndvi_path = Path(f'data/ndvi/{field_id}/ndvi.tif')
+    ndvi_path = Path(f'data/ndvi/{field_id}/ndvi_july.tif')
     boundary_file = Path(f'data/fields/{field_id}_boundary.geojson')
     
     if not ndvi_path.exists():
@@ -27,22 +28,21 @@ def create_composite_map(field_id: str, mean_ndvi: float, soil: str, texture: st
     
     print(f'Processing {field_id}...')
     
-    # Read data
+    # Read boundary
+    field_gdf = gpd.read_file(boundary_file)
+    field_gdf_3857 = field_gdf.to_crs(epsg=3857)
+    bounds_3857 = field_gdf_3857.total_bounds
+    
+    # Get source CRS and project boundary
     with rasterio.open(ndvi_path) as src:
-        field_gdf = gpd.read_file(boundary_file)
-        field_gdf_3857 = field_gdf.to_crs(epsg=3857)
-        field_gdf_proj = field_gdf.to_crs(src.crs)
+        src_crs = src.crs
+        field_gdf_proj = field_gdf.to_crs(src_crs)
         
-        # Clip NDVI to field boundary
-        clipped, clip_transform = mask(src, [field_gdf_proj.iloc[0].geometry], crop=True)
+        # Clip NDVI to boundary
+        clipped, clip_transform = raster_mask(src, [field_gdf_proj.iloc[0].geometry], crop=True)
         clipped_masked = np.ma.masked_invalid(clipped[0])
         
-        # Get NDVI extent in 3857
-        ndvi_bounds_3857 = transform_bounds(src.crs, 'EPSG:3857',
-                                            src.bounds.left, src.bounds.bottom,
-                                            src.bounds.right, src.bounds.top)
-        
-        # Get stats
+        # Get stats from valid data
         valid = clipped_masked[~clipped_masked.mask]
         if len(valid) > 0:
             ndvi_min = float(np.min(valid))
@@ -50,37 +50,69 @@ def create_composite_map(field_id: str, mean_ndvi: float, soil: str, texture: st
             ndvi_mean = float(np.mean(valid))
         else:
             ndvi_min = ndvi_max = ndvi_mean = 0
-    
-    # Get field bounds in 3857
-    field_bounds_3857 = field_gdf_3857.total_bounds
+        
+        # Use exact field bounds (no shrink)
+        target_width = int((bounds_3857[2] - bounds_3857[0]) / 10)
+        target_height = int((bounds_3857[3] - bounds_3857[1]) / 10)
+        
+        target_transform = rasterio.transform.from_bounds(
+            bounds_3857[0], bounds_3857[1], bounds_3857[2], bounds_3857[3],
+            target_width, target_height
+        )
+        
+        # Create a pixel-level mask from the field boundary
+        from rasterio.features import geometry_mask
+        field_mask = geometry_mask(
+            [field_gdf_proj.iloc[0].geometry],
+            out_shape=(target_height, target_width),
+            transform=target_transform,
+            all_touched=False
+        )
+        
+        # Reproject to exact field bounds
+        reprojected = np.full((target_height, target_width), np.nan, dtype=np.float32)
+        
+        reproject(
+            source=clipped_masked.filled(np.nan),
+            destination=reprojected,
+            src_transform=clip_transform,
+            src_crs=src_crs,
+            dst_transform=target_transform,
+            dst_crs='EPSG:3857',
+            resampling=Resampling.bilinear
+        )
+        
+        # Apply field boundary mask to remove outside pixels
+        reprojected[~field_mask] = np.nan
+        reprojected_masked = np.ma.masked_invalid(reprojected)
+        
+        # Exact extent matches field bounds
+        ndvi_extent = [bounds_3857[0], bounds_3857[2], bounds_3857[1], bounds_3857[3]]
     
     # Create figure
     fig, ax = plt.subplots(1, 1, figsize=(16, 14))
     
-    # Set extent to field bounds + margin (for satellite context)
-    margin = 500  # Larger margin to show surrounding area
-    ax.set_xlim(field_bounds_3857[0] - margin, field_bounds_3857[2] + margin)
-    ax.set_ylim(field_bounds_3857[1] - margin, field_bounds_3857[3] + margin)
+    # Set extent with margin
+    margin = 500
+    ax.set_xlim(bounds_3857[0] - margin, bounds_3857[2] + margin)
+    ax.set_ylim(bounds_3857[1] - margin, bounds_3857[3] + margin)
     
-    # Add satellite basemap (this becomes the background - outside field)
+    # Add satellite basemap
     ctx.add_basemap(ax, source=ctx.providers.Esri.WorldImagery, zoom=14)
     
-    # Overlay NDVI ONLY inside the field boundary (higher opacity for vivid colors)
-    # Use the NDVI bounds in 3857 for the overlay
-    im = ax.imshow(clipped_masked, cmap='RdYlGn', 
+    # Overlay NDVI
+    im = ax.imshow(reprojected_masked, cmap='RdYlGn', 
                    vmin=-0.1, vmax=0.8,
-                   extent=ndvi_bounds_3857,
+                   extent=ndvi_extent,
                    origin='upper',
-                   alpha=0.85,
+                   alpha=1.0,
                    interpolation='nearest')
     
-    # Add field boundary outline (thick yellow)
+    # Add field boundary outlines
     field_gdf_3857.plot(ax=ax, edgecolor='yellow', linewidth=4, facecolor='none')
-    
-    # Add white outer outline for contrast
     field_gdf_3857.plot(ax=ax, edgecolor='white', linewidth=6, facecolor='none')
     
-    # Add comprehensive label
+    # Add label
     label = f'''{field_id}
 {soil} {texture}
 {acres:.1f} acres
@@ -95,7 +127,7 @@ NDVI Stats:
                bbox=dict(facecolor='white', alpha=0.9, edgecolor='black', linewidth=2),
                linespacing=1.5)
     
-    # Add vivid colorbar
+    # Add colorbar
     cbar = plt.colorbar(im, ax=ax, fraction=0.035, pad=0.02, shrink=0.8)
     cbar.set_label('NDVI Value', fontsize=14, fontweight='bold')
     cbar.ax.tick_params(labelsize=11)

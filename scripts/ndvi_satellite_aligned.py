@@ -106,7 +106,8 @@ def create_satellite_ndvi_map_aligned(ndvi_path: Path, field_id: str, output_pat
         texture = field_info.get('surface_texture', 'Unknown')
         acres = field_info.get('area_acres', 0)
         
-        label = f"{field_id}\n{soil} {texture}\n{acres:.1f} ac\nMean NDVI: {stats['mean_ndvi']:.3f}"
+        mean_ndvi = stats.get('mean_ndvi', 0)
+        label = f"{field_id}\n{soil} {texture}\n{acres:.1f} ac\nMean NDVI: {mean_ndvi:.3f}"
         ax.annotate(label, (0.02, 0.98), ha='left', va='top',
                    transform=ax.transAxes, fontsize=10, color='white', fontweight='bold',
                    bbox=dict(facecolor='black', alpha=0.7))
@@ -136,7 +137,8 @@ def create_satellite_ndvi_map_aligned(ndvi_path: Path, field_id: str, output_pat
     texture = field_info.get('surface_texture', 'Unknown')
     acres = field_info.get('area_acres', 0)
     
-    label = f"{field_id}\n{soil} {texture}\n{acres:.1f} ac\nMean NDVI: {stats['mean_ndvi']:.3f}"
+    mean_ndvi = stats.get('mean_ndvi', 0)
+    label = f"{field_id}\n{soil} {texture}\n{acres:.1f} ac\nMean NDVI: {mean_ndvi:.3f}"
     ax.annotate(label, (0.02, 0.98), ha='left', va='top',
                transform=ax.transAxes, fontsize=10, color='white', fontweight='bold',
                bbox=dict(facecolor='black', alpha=0.7))
@@ -166,19 +168,15 @@ def main():
         "field_005": {"soil_series": "Kennebec", "surface_texture": "Silt loam", "area_acres": 70.7},
     }
     
-    stats_map = {
-        "field_001": {"mean_ndvi": 0.121},
-        "field_002": {"mean_ndvi": 0.108},
-        "field_003": {"mean_ndvi": 0.106},
-        "field_004": {"mean_ndvi": 0.160},
-        "field_005": {"mean_ndvi": 0.135},
-    }
+    stats_map = {}
     
     for field_id in fields:
         print(f"\nProcessing {field_id}...")
         
-        # Find NDVI file
-        ndvi_path = Path(f'data/ndvi/{field_id}/ndvi.tif')
+        # Find NDVI file - prefer July data
+        ndvi_path = Path(f'data/ndvi/{field_id}/ndvi_july.tif')
+        if not ndvi_path.exists():
+            ndvi_path = Path(f'data/ndvi/{field_id}/ndvi.tif')
         if not ndvi_path.exists():
             ndvi_path = Path(f'data/ndvi/{field_id}_ndvi.tif')
         
@@ -186,7 +184,17 @@ def main():
             print(f'No NDVI file for {field_id}')
             continue
         
-        output_path = Path(f'data/{field_id}_ndvi_satellite.png')
+        # Compute stats from the actual NDVI file
+        with rasterio.open(ndvi_path) as src:
+            data = src.read(1)
+            valid = ~np.isnan(data)
+            stats = {
+                "mean_ndvi": float(np.mean(data[valid])) if valid.any() else 0,
+                "min_ndvi": float(np.min(data[valid])) if valid.any() else 0,
+                "max_ndvi": float(np.max(data[valid])) if valid.any() else 0,
+            }
+        
+        output_path = Path(f'data/{field_id}_ndvi_july.png')
         
         field_info = field_info_map.get(field_id, {})
         stats = stats_map.get(field_id, {})
