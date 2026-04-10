@@ -284,6 +284,35 @@ export type AgentDefaultsConfig = {
   };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: AgentSandboxConfig;
+  /** Outbound request rate limiting to LLM providers. */
+  rateLimit?: AgentRateLimitConfig;
+  /** HTTP transport tuning (connection pooling, keep-alive). */
+  network?: AgentNetworkConfig;
+};
+
+/** Rate limiting for outbound LLM API requests. */
+export type AgentRateLimitConfig = {
+  /** Tokens added per second across all providers (default: 10). */
+  tokensPerSecond?: number;
+  /** Maximum burst capacity (default: 20). */
+  burstCapacity?: number;
+  /** Max time to wait for a token before timing out (ms, default: 60000). */
+  acquireTimeoutMs?: number;
+  /** Per-provider overrides keyed by provider id (e.g. "opencode", "openai"). */
+  providers?: Record<string, {
+    tokensPerSecond?: number;
+    burstCapacity?: number;
+  }>;
+};
+
+/** HTTP transport tuning for the undici dispatcher. */
+export type AgentNetworkConfig = {
+  /** Max concurrent connections per origin (default: 6). */
+  maxConnectionsPerOrigin?: number;
+  /** Keep-alive timeout for idle connections (ms, default: 30000). */
+  keepAliveTimeoutMs?: number;
+  /** Max keep-alive timeout for long-lived connections (ms, default: 600000). */
+  keepAliveMaxTimeoutMs?: number;
 };
 
 export type AgentCompactionMode = "default" | "safeguard";

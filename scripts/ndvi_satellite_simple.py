@@ -45,8 +45,8 @@ def create_satellite_ndvi_map_simple(ndvi_path: Path, field_id: str, output_path
         
         # Overlay NDVI in lat/lon
         extent_lon = [left, right, bottom, top]
-        im = ax.imshow(ndvi_masked, cmap='RdYlGn', vmin=-0.2, vmax=1.0, 
-                      extent=extent_lon, origin='upper', alpha=0.5)
+        im = ax.imshow(ndvi_masked, cmap='RdYlGn', vmin=0.0, vmax=0.6, 
+                      extent=extent_lon, origin='upper', alpha=0.85)
         
         # Plot field boundary in lat/lon
         field_gdf.plot(ax=ax, edgecolor='yellow', linewidth=3, facecolor='none')
@@ -54,7 +54,7 @@ def create_satellite_ndvi_map_simple(ndvi_path: Path, field_id: str, output_path
     except Exception as e:
         print(f"Warning: {e}")
         # Fallback: just show NDVI without basemap
-        im = ax.imshow(ndvi_masked, cmap='RdYlGn', vmin=-0.2, vmax=1.0, 
+        im = ax.imshow(ndvi_masked, cmap='RdYlGn', vmin=0.0, vmax=0.6, 
                       extent=[left, right, bottom, top], origin='upper')
         
         field_gdf = gpd.read_file(f'data/fields/{field_id}_boundary.geojson')

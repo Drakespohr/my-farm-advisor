@@ -546,6 +546,145 @@ Integrate multiple spatial data sources (field boundaries, soil data, weather da
 
 ---
 
+## Assignment 08: Soil Erosion & Sustainability Analysis
+
+### Objective
+Analyze erosion risk and carbon storage potential for 20 agricultural fields using NRCS Soil Data Access API, DEM elevation data, and create comprehensive soil health visualizations.
+
+### Data Sources
+
+| Source | Description | Method |
+|--------|-------------|--------|
+| NRCS Soil Data Access | K-factor, OM%, bulk density, pH, drainage | Live API query (`sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest`) |
+| Open-Elevation API | Slope calculation from elevation grid | Grid-based DEM extraction |
+| OpenStreetMap | Additional 15 field locations | OSM farmland polygons |
+
+### Methodology
+
+#### Step 1: Erosion Risk Analysis (Original 5 Fields)
+- Query NRCS for K-factor (soil erodibility) at each field centroid
+- Download DEM data from Open-Elevation API
+- Calculate slope percentage from elevation grid
+- Calculate composite risk score: `0.5 × normalized_K + 0.5 × normalized_slope`
+
+**Erosion Risk Formula:**
+```
+K-factor risk: K > 0.35 = High, K > 0.25 = Moderate, else Low
+Composite score: 0.5 × (K/0.43) + 0.5 × (slope/15)
+```
+
+#### Step 2: Carbon Storage Analysis (Original 5 Fields)
+- Query NRCS for organic matter %, bulk density, topsoil depth
+- Calculate carbon stock: `OM% × BD × depth_cm × 1.724`
+
+**Carbon Stock Formula:**
+```
+carbon_stock = om_pct × bulk_density × topsoil_depth_cm × 1.724
+```
+
+#### Step 3: Extended Field Analysis (20 Fields)
+- Added 15 new fields from OSM farmland polygons in the area
+- Queried NRCS for all soil metrics at each field centroid
+- Calculated composite soil health score
+
+**Soil Health Score Formula:**
+```
+soil_health = (carbon_normalized × 0.4) + (pH_optimal × 0.3) + (drainage_good × 0.3)
+```
+
+### Key Results
+
+#### Erosion Risk (5 Original Fields)
+
+| Field | K-Factor | K-Risk | Slope % | Composite Risk | Category |
+|-------|----------|--------|---------|----------------|----------|
+| field_001 | 0.418 | High | 6.5% | 0.703 | High |
+| field_002 | 0.418 | High | 9.7% | 0.811 | High |
+| field_003 | 0.387 | High | 3.0% | 0.551 | High |
+| field_004 | 0.323 | Moderate | 2.2% | 0.447 | Moderate |
+| field_005 | 0.400 | High | 4.3% | 0.609 | High |
+
+#### Carbon Storage (5 Original Fields)
+
+| Field | OM % | Bulk Density | Carbon Stock | Category |
+|-------|------|--------------|--------------|----------|
+| field_001 | 1.72% | 1.42 g/cm³ | 125.9 | High |
+| field_002 | 1.72% | 1.42 g/cm³ | 125.9 | High |
+| field_003 | 2.42% | 1.35 g/cm³ | 168.6 | High |
+| field_004 | 3.12% | 1.30 g/cm³ | 209.9 | High |
+| field_005 | 1.95% | 1.32 g/cm³ | 133.1 | High |
+
+#### Extended Analysis (20 Fields)
+
+| Metric | Range | Median | Best Field |
+|--------|-------|--------|------------|
+| Organic Matter % | 1.55 - 3.12% | 1.95% | field_004 (3.12%) |
+| K-Factor | 0.318 - 0.412 | 0.36 | field_004 (0.318) |
+| Carbon Stock | 103.5 - 209.9 | 133.1 | field_004 (209.9) |
+| Soil Health Score | 0.72 - 0.96 | 0.85 | field_019 (0.96) |
+| Slope % | 2.2 - 9.7% | 3.7% | field_004 (2.2%) |
+
+### Most Common Soil Limitation
+
+**DRAINAGE CLASS DISTRIBUTION (20 fields):**
+
+| Drainage Class | Count | Percentage |
+|---------------|-------|------------|
+| **Well drained** | **18** | **90%** |
+| Poorly drained | 1 | 5% |
+| Moderately well drained | 1 | 5% |
+
+**Finding:** The most common soil limitation is **"none"** - 90% of fields (18 out of 20) are **well drained** with no significant drainage limitations.
+
+**Secondary Limitation (Erosion Risk):**
+- 5 fields have high erosion risk (K-factor > 0.38)
+- These fields (field_015, 016, 017, 018, 020) need priority conservation attention
+
+### Visualizations Created
+
+| Visualization | Description | Output |
+|---------------|-------------|--------|
+| Bar Chart | Grouped bar chart comparing all 20 fields | data/field_comparison_bar_chart.png |
+| Box Plot | Distribution of 4 core metrics (OM%, K-factor, Carbon, Health) | data/field_comparison_boxplot.png |
+| Spatial Drainage Map | Geographic distribution of drainage classes | data/field_drainage_map.png |
+| Soil Health Radar | Top 5 vs Bottom 5 fields comparison (unique colors) | data/soil_health_radar.png |
+| Sustainability Heatmap | All 20 fields across 7 sustainability metrics | data/sustainability_heatmap.png |
+
+### Dashboard Assets
+
+| File | Description |
+|------|-------------|
+| output/dashboard_assets/soil_health_radar.png | Radar chart for soil health comparison |
+| output/dashboard_assets/sustainability_heatmap.png | Sustainability metrics heatmap |
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| scripts/erosion_risk_analysis.py | Query NRCS for K-factor, download DEM, calculate slope |
+| scripts/carbon_storage_analysis.py | Query NRCS for OM, BD, calculate carbon stock |
+| scripts/field_comparison_analysis.py | Full 20-field analysis with bar chart and box plot |
+| scripts/field_drainage_map.py | Spatial map of drainage classes |
+| scripts/soil_health_viz.py | Radar chart and heatmap visualizations |
+
+### Data Output Files
+
+| File | Description |
+|------|-------------|
+| data/erosion_risk_analysis.csv | Erosion risk for 5 original fields |
+| data/carbon_storage_analysis.csv | Carbon storage for 5 original fields |
+| data/field_comparison_analysis.csv | Full data for all 20 fields |
+
+### Key Learnings
+
+1. **NRCS API access**: Successfully connected to `sdmdataaccess.sc.egov.usda.gov` for live soil data
+2. **DEM integration**: Used Open-Elevation API as alternative to AWS Terrain Tiles for slope calculation
+3. **OSM field discovery**: Found 15 additional fields from OSM farmland polygons
+4. **Unique visualization colors**: Updated radar chart with unique colors per field (instead of grouped)
+5. **Composite scoring**: Combined multiple factors (OM, pH, drainage, erosion, slope) for soil health
+
+---
+
 *Document Created: 2026-03-27*  
-*Last Updated: 2026-03-29*  
-*Branch: feature-assignment-07-spatial-integration*
+*Last Updated: 2026-04-01*  
+*Branch: feature-assignment-08-soil-erosion-sustainability*

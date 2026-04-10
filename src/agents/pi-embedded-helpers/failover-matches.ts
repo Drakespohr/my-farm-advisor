@@ -15,6 +15,8 @@ const ERROR_PATTERNS = {
     /\btpm\b/i,
     "tokens per minute",
     "tokens per day",
+    /rate\s+(?:increased|grew)\s+too\s+quickly/i,
+    /scale\s+requests\s+more\s+smoothly/i,
   ],
   overloaded: [
     /overloaded_error|"type"\s*:\s*"overloaded_error"/i,

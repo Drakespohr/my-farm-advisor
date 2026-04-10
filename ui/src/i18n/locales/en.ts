@@ -20,6 +20,7 @@ export const en: TranslationMap = {
     chat: "Chat",
     control: "Control",
     agent: "Agent",
+    farm: "Farm",
     settings: "Settings",
     expand: "Expand sidebar",
     collapse: "Collapse sidebar",
@@ -36,6 +37,7 @@ export const en: TranslationMap = {
     skills: "Skills",
     nodes: "Nodes",
     chat: "Chat",
+    farm: "Farm",
     config: "Config",
     communications: "Communications",
     appearance: "Appearance",
@@ -48,6 +50,7 @@ export const en: TranslationMap = {
   subtitles: {
     agents: "Workspaces, tools, identities.",
     overview: "Status, entry points, health.",
+    farm: "Field KPIs and metrics.",
     channels: "Channels and settings.",
     instances: "Connected clients and nodes.",
     sessions: "Active sessions and defaults.",

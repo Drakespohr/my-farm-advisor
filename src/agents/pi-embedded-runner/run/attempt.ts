@@ -2031,6 +2031,44 @@ export async function runEmbeddedAttempt(
         return innerStreamFn(model, context, options);
       };
 
+      // Rate-limit outbound LLM requests per provider to smooth bursty request
+      // patterns and prevent 429s before they happen. The wrapper acquires a
+      // token from the per-provider token bucket before each stream call.
+      // Enabled by default with sensible defaults; config can override.
+      const providerIdForRateLimit =
+        typeof params.model.provider === "string" && params.model.provider.trim().length > 0
+          ? params.model.provider
+          : params.provider;
+      const rateLimitConfig = params.config?.agents?.defaults?.rateLimit;
+      const { acquireProviderToken } = await import(
+        "../../../infra/provider-rate-limiter.js"
+      );
+      const { configureProviderRateLimiter } = await import(
+        "../../../infra/provider-rate-limiter.js"
+      );
+      configureProviderRateLimiter({
+        tokensPerSecond: rateLimitConfig?.tokensPerSecond,
+        burstCapacity: rateLimitConfig?.burstCapacity,
+        acquireTimeoutMs: rateLimitConfig?.acquireTimeoutMs,
+        providers: rateLimitConfig?.providers,
+      });
+      const rateLimitedStreamFn = activeSession.agent.streamFn;
+      activeSession.agent.streamFn = async (model, context, options) => {
+        try {
+          const acquireTimeoutMs =
+            typeof rateLimitConfig?.acquireTimeoutMs === "number" &&
+            Number.isFinite(rateLimitConfig.acquireTimeoutMs)
+              ? rateLimitConfig.acquireTimeoutMs
+              : 60_000;
+          await acquireProviderToken(providerIdForRateLimit, acquireTimeoutMs);
+        } catch (rateLimitErr) {
+          log.warn(
+            `rate-limiter: failed acquiring token for provider=${providerIdForRateLimit}: ${String(rateLimitErr)}`,
+          );
+        }
+        return rateLimitedStreamFn(model, context, options);
+      };
+
       // Some models emit tool names with surrounding whitespace (e.g. " read ").
       // pi-agent-core dispatches tool calls with exact string matching, so normalize
       // names on the live response stream before tool execution.

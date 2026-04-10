@@ -142,6 +142,8 @@ export type AppViewState = {
   channelsError: string | null;
   channelsLastSuccess: number | null;
   whatsappLoginMessage: string | null;
+  farmSelectedFieldId: string | null;
+  farmSelectedSoilType: string | null;
   whatsappLoginQrDataUrl: string | null;
   whatsappLoginConnected: boolean | null;
   whatsappBusy: boolean;

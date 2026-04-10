@@ -93,6 +93,7 @@ import { renderExecApprovalPrompt } from "./views/exec-approval.ts";
 import { renderGatewayUrlConfirmation } from "./views/gateway-url-confirmation.ts";
 import { renderLoginGate } from "./views/login-gate.ts";
 import { renderOverview } from "./views/overview.ts";
+import { renderFarmDashboard } from "./views/farm-dashboard.ts";
 
 // Lazy-loaded view modules – deferred so the initial bundle stays small.
 // Each loader resolves once; subsequent calls return the cached module.
@@ -657,6 +658,21 @@ export function renderApp(state: AppViewState) {
                 onRefresh: () => state.loadOverview(),
                 onNavigate: (tab) => state.setTab(tab as import("./navigation.ts").Tab),
                 onRefreshLogs: () => state.loadOverview(),
+              })
+            : nothing
+        }
+
+        ${
+          state.tab === "farm"
+            ? renderFarmDashboard({
+                selectedFieldId: state.farmSelectedFieldId,
+                selectedSoilType: state.farmSelectedSoilType,
+                onFieldIdChange: (fieldId) => {
+                  state.farmSelectedFieldId = fieldId;
+                },
+                onSoilTypeChange: (soilType) => {
+                  state.farmSelectedSoilType = soilType;
+                },
               })
             : nothing
         }

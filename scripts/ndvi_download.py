@@ -269,7 +269,7 @@ def main():
     ndvi_dir.mkdir(exist_ok=True)
 
     fields_dir = data_dir / "fields"
-    fields = ["field_001", "field_002", "field_003", "field_004", "field_005"]
+    fields = [f"field_{i:03d}" for i in range(1, 21)]
 
     all_stats = []
 

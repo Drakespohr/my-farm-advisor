@@ -8,8 +8,18 @@ const AUTO_SELECT_FAMILY_ATTEMPT_TIMEOUT_MS = 300;
 
 let lastAppliedTimeoutKey: string | null = null;
 let lastAppliedProxyBootstrap = false;
+let lastAppliedNetworkKey: string | null = null;
 
 type DispatcherKind = "agent" | "env-proxy" | "unsupported";
+
+export type UndiciNetworkOptions = {
+  /** Max concurrent connections per origin (default: 6). */
+  connections?: number;
+  /** Keep-alive timeout for idle connections (ms, default: 30000). */
+  keepAliveTimeout?: number;
+  /** Max keep-alive timeout for long-lived connections (ms, default: 600000). */
+  keepAliveMaxTimeout?: number;
+};
 
 function resolveDispatcherKind(dispatcher: unknown): DispatcherKind {
   const ctorName = (dispatcher as { constructor?: { name?: string } })?.constructor?.name;
@@ -59,6 +69,10 @@ function resolveDispatcherKey(params: {
   const autoSelectToken =
     params.autoSelectFamily === undefined ? "na" : params.autoSelectFamily ? "on" : "off";
   return `${params.kind}:${params.timeoutMs}:${autoSelectToken}`;
+}
+
+function resolveNetworkKey(params: UndiciNetworkOptions): string {
+  return `${params.connections ?? "d"}:${params.keepAliveTimeout ?? "d"}:${params.keepAliveMaxTimeout ?? "d"}`;
 }
 
 function resolveCurrentDispatcherKind(): DispatcherKind | null {
@@ -141,7 +155,59 @@ export function ensureGlobalUndiciStreamTimeouts(opts?: { timeoutMs?: number }):
   }
 }
 
+/**
+ * Configure the global undici dispatcher with connection pooling options.
+ *
+ * This limits concurrent connections per origin, tunes keep-alive behavior,
+ * and disables HTTP pipelining (safer for streaming APIs).
+ */
+export function ensureGlobalUndiciNetworkOptions(opts?: UndiciNetworkOptions): void {
+  const connections = opts?.connections ?? 6;
+  const keepAliveTimeout = opts?.keepAliveTimeout ?? 30_000;
+  const keepAliveMaxTimeout = opts?.keepAliveMaxTimeout ?? 600_000;
+
+  const nextKey = resolveNetworkKey({ connections, keepAliveTimeout, keepAliveMaxTimeout });
+  if (lastAppliedNetworkKey === nextKey) {
+    return;
+  }
+
+  const kind = resolveCurrentDispatcherKind();
+  if (kind === null) {
+    return;
+  }
+
+  const autoSelectFamily = resolveAutoSelectFamily();
+  const connect = resolveConnectOptions(autoSelectFamily);
+
+  try {
+    if (kind === "env-proxy") {
+      const proxyOptions = {
+        connections,
+        keepAliveTimeout,
+        keepAliveMaxTimeout,
+        pipelining: 0,
+        ...(connect ? { connect } : {}),
+      } as ConstructorParameters<typeof EnvHttpProxyAgent>[0];
+      setGlobalDispatcher(new EnvHttpProxyAgent(proxyOptions));
+    } else {
+      setGlobalDispatcher(
+        new Agent({
+          connections,
+          keepAliveTimeout,
+          keepAliveMaxTimeout,
+          pipelining: 0,
+          ...(connect ? { connect } : {}),
+        }),
+      );
+    }
+    lastAppliedNetworkKey = nextKey;
+  } catch {
+    // Best-effort hardening only.
+  }
+}
+
 export function resetGlobalUndiciStreamTimeoutsForTests(): void {
   lastAppliedTimeoutKey = null;
   lastAppliedProxyBootstrap = false;
+  lastAppliedNetworkKey = null;
 }

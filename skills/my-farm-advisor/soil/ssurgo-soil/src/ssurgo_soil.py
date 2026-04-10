@@ -64,7 +64,24 @@ EXTENDED_COLUMNS = [
     "drainagecl",  # Drainage class
 ]
 
-SDA_COLUMNS = EXTENDED_COLUMNS
+SDA_COLUMNS = [
+    "mukey",
+    "muname",
+    "compname",
+    "comppct_r",
+    "drainagecl",
+    "hzdept_r",
+    "hzdepb_r",
+    "om_r",
+    "ph1to1h2o_r",
+    "awc_r",
+    "claytotal_r",
+    "sandtotal_r",
+    "silttotal_r",
+    "dbthirdbar_r",
+    "cec7_r",
+    "kwfact",
+]
 
 # Extended numeric columns
 EXTENDED_NUMERIC_COLUMNS = [
@@ -82,6 +99,8 @@ EXTENDED_NUMERIC_COLUMNS = [
     "kwfact",
     "hydgrpdcd",
 ]
+
+NUMERIC_COLUMNS = EXTENDED_NUMERIC_COLUMNS
 
 
 def _check_deps() -> None:
