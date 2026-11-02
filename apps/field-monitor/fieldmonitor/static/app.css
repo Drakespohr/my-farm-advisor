@@ -267,3 +267,8 @@ select { max-width: 100%; }
 #mapper-meta label:last-child { flex: 0 1 34%; }
 #mapper-meta input { width: 100%; }
 .leaflet-interactive:focus { outline: none; }
+
+.chart .dot.suspect { fill: var(--surface-1); stroke: var(--text-muted); stroke-width: 2; stroke-dasharray: 2 2; }
+.alert.pending { background: var(--surface-2); color: var(--text-primary); border: 1px dashed var(--border); }
+.chip { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 10px; margin-right: 4px; border: 1px solid currentColor; }
+.warn-text { color: var(--warn-ink); }

@@ -46,6 +46,14 @@
     }
     return res.status === 204 ? null : res.json();
   }
+  const qaText = (o) => (o.qa_flags || []).map((f) => f.detail).join("; ");
+  const qaShort = (o) => {
+    const codes = (o.qa_flags || []).map((f) => f.code);
+    if (o.qa_status === "suspect") return codes.includes("haze") ? "suspect: haze" : "suspect: one-pass artifact";
+    if (codes.includes("haze-caution")) return "slightly hazy";
+    if (codes.includes("partial")) return "partly cloudy";
+    return "";
+  };
   const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
   const pct = (v) => (v == null ? "–" : `${Math.round(v * 100)}%`);
   const isoToday = () => new Date().toISOString().slice(0, 10);
@@ -544,8 +552,10 @@
     const sel = $("obs-select");
     sel.replaceChildren();
     for (const o of visibleObs().slice().reverse()) {
+      const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
+      const q = qaShort(o);
       const label = o.status === "clear"
-        ? `${o.date} · ${state.indexByKey[state.indexKey].name} ${fmt(o.stats[state.indexKey].median)}`
+        ? `${o.qa_status === "suspect" ? "⚠ " : ""}${o.date} · ${state.indexByKey[key].name} ${fmt(o.stats[key].median)}${q ? ` (${q})` : ""}`
         : `${o.date} · cloudy (${pct(o.field_clear_fraction)} clear)`;
       sel.append(el("option", { value: o.id, text: label }));
     }
@@ -603,7 +613,8 @@
       const st = o.stats[i.key];
       setOverlay(`${base}/${i.key}.png`, o.bounds, {
         title: `${i.name} · ${o.date}`, cmap: i.colormap, lo: i.display_range[0], hi: i.display_range[1],
-        note: `Field median ${fmt(st.median)} · CV ${fmt(st.cv)} · ${pct(o.field_clear_fraction)} clear`,
+        note: `Field median ${fmt(st.median)} · CV ${fmt(st.cv)} · ${pct(o.field_clear_fraction)} clear` +
+          (o.qa_status === "suspect" ? ` · ⚠ Suspect date, excluded from trend and alerts: ${qaText(o)}` : qaShort(o) ? ` · ${qaShort(o)}` : ""),
       });
     }
     loadHotspots(o);
@@ -649,10 +660,15 @@
     box.replaceChildren();
     if (!state.field || state.indexKey === "truecolor") return;
     api(`/api/fields/${state.field.id}/alerts?index=${state.indexKey}`).then((alerts) => {
+      const label = { high: "▲ Alert", medium: "● Watch", pending: "◷ Pending", info: "○ Info" };
+      const scope = { field: "This field only", regional: "Regional", unknown: "" };
       for (const a of alerts.slice(-3).reverse()) {
         box.append(el("div", { class: `alert ${a.severity}`, role: "status" },
-          el("span", { class: "icon", text: a.severity === "high" ? "▲ Alert" : a.severity === "info" ? "○ Info" : "● Watch" }),
-          el("span", {}, el("b", { text: `${a.date}: ` }), a.message)));
+          el("span", { class: "icon", text: label[a.severity] || "● Watch" }),
+          el("span", {},
+            el("b", { text: `${a.date}: ` }),
+            a.scope && scope[a.scope] ? el("span", { class: `chip ${a.scope}`, text: scope[a.scope] }) : null,
+            " ", a.message)));
       }
     }).catch(() => {});
   }
@@ -664,7 +680,9 @@
     const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
     const idx = state.indexByKey[key];
     $("chart-title").textContent = `${idx.name} through the season`;
-    const pts = state.obs.filter((o) => o.status === "clear").map((o) => ({ o, t: Date.parse(o.datetime), s: o.stats[key] }));
+    const allPts = state.obs.filter((o) => o.status === "clear").map((o) => ({ o, t: Date.parse(o.datetime), s: o.stats[key] }));
+    const pts = allPts.filter((p) => p.o.qa_status !== "suspect");
+    const suspect = allPts.filter((p) => p.o.qa_status === "suspect");
     const cloudy = $("show-cloudy").checked ? state.obs.filter((o) => o.status !== "clear") : [];
     $("chart-empty").hidden = pts.length > 0;
     if (!pts.length) return;
@@ -672,11 +690,11 @@
 
     const W = box.clientWidth || 600, H = box.clientHeight || 220;
     const m = { l: 40, r: 12, t: 10, b: 24 };
-    const allT = pts.map((p) => p.t).concat(cloudy.map((o) => Date.parse(o.datetime)));
+    const allT = allPts.map((p) => p.t).concat(cloudy.map((o) => Date.parse(o.datetime)));
     let t0 = Math.min(...allT), t1 = Math.max(...allT);
     if (t1 - t0 < 864e5 * 10) { t0 -= 864e5 * 5; t1 += 864e5 * 5; }
-    let y0 = Math.min(idx.display_range[0], ...pts.map((p) => p.s.p10));
-    let y1 = Math.max(idx.display_range[1], ...pts.map((p) => p.s.p90));
+    let y0 = Math.min(idx.display_range[0], ...allPts.map((p) => p.s.p10));
+    let y1 = Math.max(idx.display_range[1], ...allPts.map((p) => p.s.p90));
     const x = (t) => m.l + ((t - t0) / (t1 - t0)) * (W - m.l - m.r);
     const y = (v) => H - m.b - ((v - y0) / (y1 - y0)) * (H - m.t - m.b);
 
@@ -705,6 +723,9 @@
       const cx = x(Date.parse(o.datetime));
       s.append(svg("line", { class: "cloudy", x1: cx, x2: cx, y1: H - m.b, y2: H - m.b - 6 }));
     }
+    for (const p of suspect) {
+      s.append(svg("circle", { class: "dot suspect" + (p.o.id === state.obsId ? " selected" : ""), cx: x(p.t), cy: y(p.s.median), r: p.o.id === state.obsId ? 6 : 4.5 }));
+    }
     for (const p of pts) {
       const dot = svg("circle", { class: "dot" + (p.o.id === state.obsId ? " selected" : ""), cx: x(p.t), cy: y(p.s.median), r: p.o.id === state.obsId ? 6 : 4.5 });
       s.append(dot);
@@ -719,7 +740,7 @@
     const nearest = (evt) => {
       const r = s.getBoundingClientRect();
       const px = ((evt.clientX - r.left) / r.width) * W;
-      return pts.reduce((a, b) => (Math.abs(x(b.t) - px) < Math.abs(x(a.t) - px) ? b : a));
+      return allPts.reduce((a, b) => (Math.abs(x(b.t) - px) < Math.abs(x(a.t) - px) ? b : a));
     };
     hit.addEventListener("pointermove", (evt) => {
       const p = nearest(evt);
@@ -729,6 +750,8 @@
         el("div", { text: p.o.date }),
         el("div", { class: "muted", text: `10–90%: ${fmt(p.s.p10)}–${fmt(p.s.p90)} · CV ${fmt(p.s.cv)}` }),
         el("div", { class: "muted", text: `${pct(p.o.field_clear_fraction)} of field clear · click to view` }),
+        p.o.qa_status === "suspect" ? el("div", { class: "warn-text", text: `⚠ Excluded from trend and alerts: ${qaText(p.o)}` })
+          : qaShort(p.o) ? el("div", { class: "muted", text: `Note: ${qaText(p.o)}` }) : null,
       );
       tip.hidden = false;
       const tx = Math.min(evt.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
@@ -826,6 +849,16 @@
         kpi(`Improved ≥ ${c.threshold}`, `${pct(c.improved_share)} · ${fmt(c.improved_ha * 2.471, 1)} ac`),
         kpi("Decline patches", String(c.decline_hotspots.length)),
       ));
+      const name2 = state.indexByKey[key].name;
+      if (c.ring_change != null) {
+        const regional = c.field_change < 0 && c.ring_change <= 0.6 * c.field_change;
+        out.append(el("p", { class: "small" },
+          el("b", { text: "Inside vs. outside the field: " }),
+          `field ${fmt(c.field_change, 3)}, neighbors (30–150 m outside) ${c.ring_change >= 0 ? "+" : ""}${fmt(c.ring_change, 3)} ${name2}. `,
+          c.field_change < -0.05 ? (regional ? "The neighbors changed similarly, so this is likely weather, haze, or area-wide crop stage." : "The neighbors held steady, so the change is specific to this field.") : ""));
+      }
+      out.append(el("p", { class: "small muted", text: `Compared on the ${pct(c.overlap)} of the field that was clear on both dates.` }));
+      for (const n of c.notes || []) out.append(el("div", { class: "warning", text: n }));
       if (uniform) out.append(el("p", { class: "small muted", text: "The whole field changed together: typical of maturity, harvest, or a field-wide event (frost, hail), not a localized problem." }));
     } catch (err) {
       out.replaceChildren(el("p", { class: "small", text: err.message }));
@@ -838,12 +871,13 @@
     const t = $("obs-table");
     t.replaceChildren();
     const keys = state.indices.map((i) => i.key);
-    t.append(el("tr", {}, ["Date", "Scene", "Clear", ...state.indices.map((i) => i.name)].map((h) => el("th", { text: h }))));
+    t.append(el("tr", {}, ["Date", "Scene", "Clear", "Quality", ...state.indices.map((i) => i.name)].map((h) => el("th", { text: h }))));
     for (const o of state.obs.slice().reverse()) {
       t.append(el("tr", { class: "clickable", onclick: () => { state.obsId = o.id; state.obsPinned = true; renderObsSelect(); showSelected(); renderChart(); } },
         el("td", { text: o.date }),
         el("td", { text: o.scene_id, class: "muted" }),
         el("td", { text: pct(o.field_clear_fraction) }),
+        el("td", { text: o.status !== "clear" ? "cloudy" : (qaShort(o) || "ok"), title: qaText(o) }),
         ...keys.map((k) => el("td", { text: o.status === "clear" ? fmt(o.stats[k].median) : "–" }))));
     }
   }

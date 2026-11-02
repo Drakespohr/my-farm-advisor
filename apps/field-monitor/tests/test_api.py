@@ -8,17 +8,19 @@ from fieldmonitor.analysis import field_stats
 from tests.conftest import FIELD, ndvi_field, synthetic_grid
 
 
-def add_obs(store, field_id, date, arr):
+def add_obs(store, field_id, date, arr, qa=None, valid=None, clear_fraction=1.0):
+    from fieldmonitor import PROCESSING_VERSION
+
     t, crs = synthetic_grid()
-    valid = np.ones_like(arr, bool)
+    valid = np.ones_like(arr, bool) if valid is None else valid
     arrays = {k: arr for k in INDICES}
-    arrays.update(valid=valid, field=valid)
+    arrays.update(valid=valid, field=np.ones_like(arr, bool))
     meta = {
-        "id": f"{date}_S2X_v1", "field_id": field_id, "scene_id": f"S2X_{date}", "date": date,
-        "datetime": f"{date}T17:00:00Z", "status": "clear", "field_clear_fraction": 1.0,
-        "stats": {k: field_stats(arr) for k in INDICES}, "bounds": [[0, 0], [1, 1]],
+        "id": f"{date}_S2X_v{PROCESSING_VERSION}", "field_id": field_id, "scene_id": f"S2X_{date}", "date": date,
+        "datetime": f"{date}T17:00:00Z", "status": "clear", "field_clear_fraction": clear_fraction,
+        "stats": {k: field_stats(arr[valid]) for k in INDICES}, "bounds": [[0, 0], [1, 1]], "qa": qa or {},
         "grid": {"crs": crs, "transform": list(t)[:6], "shape": list(arr.shape), "resolution_m": 10},
-        "processing_version": "1",
+        "processing_version": PROCESSING_VERSION,
     }
     store.write_observation(field_id, meta["id"], meta, arrays, {"ndvi": b"\x89PNG"})
     return meta["id"]

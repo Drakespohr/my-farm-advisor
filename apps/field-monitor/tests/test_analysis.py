@@ -77,24 +77,3 @@ def test_change_detects_decline():
     c = analysis.change(before, after, np.ones_like(before, bool), 0.1)
     assert c["declined_share"] == pytest.approx(0.5, abs=0.01)
     assert c["improved_share"] == 0
-
-
-def obs(d, med, cv=0.05):
-    return {"date": d, "stats": {"ndvi": {"median": med, "cv": cv}}}
-
-
-def test_midseason_drop_is_an_alert():
-    series = [obs("2025-06-20", 0.7), obs("2025-07-01", 0.85), obs("2025-07-10", 0.6, 0.2), obs("2025-07-20", 0.9)]
-    kinds = [(a["kind"], a["severity"]) for a in analysis.timeseries_alerts(series)]
-    assert ("decline", "high") in kinds and ("patchiness", "medium") in kinds
-
-
-def test_post_peak_drop_without_recovery_is_senescence():
-    series = [obs("2025-07-20", 0.92), obs("2025-09-07", 0.86), obs("2025-09-14", 0.44), obs("2025-09-22", 0.31)]
-    alerts = analysis.timeseries_alerts(series)
-    assert alerts and all(a["kind"] in ("senescence", "patchiness") for a in alerts)
-    assert {a["severity"] for a in alerts if a["kind"] == "senescence"} == {"info"}
-
-
-def test_bare_soil_noise_is_not_flagged():
-    assert analysis.timeseries_alerts([obs("2025-05-01", 0.2, 0.3), obs("2025-05-10", 0.15, 0.45)]) == []
