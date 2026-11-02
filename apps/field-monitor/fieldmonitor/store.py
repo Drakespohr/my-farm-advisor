@@ -139,6 +139,7 @@ class Store:
         crop: str | None = None,
         notes: str | None = None,
         source: str = "manual",
+        replaces: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Create a field. Returns (record, created). Re-importing the same boundary is a no-op."""
         geometry = normalize_geometry(geometry)
@@ -173,9 +174,11 @@ class Store:
                 "source": source,
                 "created": now_iso(),
                 "archived": False,
+                "replaces": replaces,
+                "replaced_by": None,
             }
             (d / "field.json").write_text(json.dumps(rec, indent=2))
-        self.log("field.created", field_id=fid, geometry_hash=ghash, source=source)
+        self.log("field.created", field_id=fid, geometry_hash=ghash, source=source, replaces=replaces)
         return rec, True
 
     def update_field_meta(self, field_id: str, **changes: Any) -> dict[str, Any]:
@@ -190,6 +193,30 @@ class Store:
             (self._field_dir(field_id) / "field.json").write_text(json.dumps(rec, indent=2))
         self.log("field.updated", field_id=field_id, before=before, after=changes)
         return rec
+
+    def redraw_field(self, field_id: str, geometry: dict[str, Any]) -> dict[str, Any]:
+        """Save an edited boundary as a new field version and archive the old one.
+
+        Boundaries are immutable so every observation stays tied to the shape it was
+        measured on. The old version keeps its history and links forward via `replaced_by`.
+        """
+        old = self.get_field(field_id)
+        if old.get("replaced_by"):
+            raise FileExistsError(f"{field_id} was already replaced by {old['replaced_by']}; edit that version instead.")
+        base = re.sub(r"-v\d+$", "", field_id)
+        n = 2
+        while (self.root / "fields" / f"{base}-v{n}").exists():
+            n += 1
+        new, _ = self.create_field(
+            geometry, old["name"], field_id=f"{base}-v{n}", crop=old.get("crop"), notes=old.get("notes"),
+            source="redraw", replaces=field_id,
+        )
+        with _LOCK:
+            rec = self.get_field(field_id)
+            rec.update(archived=True, replaced_by=new["id"])
+            (self._field_dir(field_id) / "field.json").write_text(json.dumps(rec, indent=2))
+        self.log("field.replaced", field_id=field_id, replaced_by=new["id"])
+        return new
 
     # ---- observations --------------------------------------------------------
     @staticmethod

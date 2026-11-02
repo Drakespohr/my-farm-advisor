@@ -1,9 +1,10 @@
 # Field Monitor
 
-Satellite field monitoring for farms. Draw or import field boundaries, pull every
-Sentinel-2 pass over them, and get per-field vegetation, chlorophyll, moisture,
-water, and residue maps, plus a season trend, scouting hotspots with GPS points,
-management zones, and before/after change maps.
+Satellite field monitoring for farms. Outline a field on a satellite map the way you plan a
+drone mapping mission, or import a KML/KMZ/GeoJSON boundary, and the field keeps itself up to date.
+Every new Sentinel-2 pass is pulled automatically and turned into per-field vegetation,
+chlorophyll, moisture, water, and residue maps, plus a season trend, scouting hotspots with GPS
+points, management zones, and before/after change maps.
 
 - **Imagery:** Copernicus Sentinel-2 L2A surface reflectance, 10 m, a new pass every ~2–5 days.
   It's free and needs no account. Scenes come from the
@@ -27,11 +28,36 @@ uv venv && uv pip install -e '.[dev]'      # or: python -m venv .venv && pip ins
 .venv/bin/fieldmonitor serve            # http://127.0.0.1:8765
 ```
 
-In the UI: pick a field (or **Draw boundary**), set a date range, and press **Fetch imagery**.
-A full season (~45 scenes) takes about a minute. Only the field's own pixels are read from
-the cloud-optimized GeoTIFFs, not whole 110 km tiles.
+### Mapping a field (drone-mission style)
+
+1. Press **＋ Map a new field**. It opens automatically when a farm has no fields yet.
+2. Find the field. Search a town, road, or address, type coordinates as `lat, lon`, or press
+   **◎ My location** in the field.
+3. Tap each corner of the field edge on the satellite image. The bottom sheet shows live
+   acreage, hectares, and edge length.
+4. Adjust: **drag** a corner to move it, tap a **＋** midpoint to add a corner on that edge,
+   tap a corner to remove it. **Undo** (Ctrl/⌘-Z) steps back. Edges that cross, or outlines
+   over ~12,000 ac, are flagged and can't be saved.
+5. Name it, optionally set the crop, and press **Save field**.
+
+Saving starts an automatic backfill of the last 12 months of imagery (about 1–2 minutes;
+progress shows on the field). After that, the server checks every field for new passes every
+12 hours. **Check for new imagery** forces a check now. Older seasons can be pulled from
+**Fetch a specific date range**.
+
+**Edit boundary** opens the same editor on an existing field. Saving creates a new version
+(`<id>-v2`) with its own imagery and archives the old one. The old boundary keeps its
+history, so past numbers are never silently re-measured on a different shape.
+
+**Import** accepts `.kml` and `.kmz` (DJI Pilot 2 / DJI Terra mapping-area missions, Google
+Earth, most farm software) and `.geojson`. Every polygon becomes a field. Imports of more
+than 5 fields are backfilled one field at a time by the scheduler.
+
+Only the field's own pixels are read from the cloud-optimized GeoTIFFs, not whole 110 km tiles.
 
 Data is written to `./data` by default. Set `FIELD_MONITOR_DATA=/path` to change it.
+Set `FIELD_MONITOR_REFRESH_HOURS` to change how often fields are checked for new passes
+(default `12`; `0` turns automatic updates off).
 In Docker deployments, point it at persistent storage (for example `/data/field-monitor`).
 
 ### Command line (for scheduled jobs and the Data Pipeline agent)
@@ -104,10 +130,13 @@ orientation aids, not agronomic thresholds. Confirm anything that matters by sco
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/indices` | Index catalog with formulas, ranges, color ramps, guidance |
-| GET/POST | `/api/fields` | List fields / create from Polygon, Feature, or FeatureCollection |
+| GET/POST | `/api/fields` | List fields (with sync status) / create from GeoJSON or an uploaded KML/KMZ/GeoJSON file; new fields start syncing |
 | GET/PATCH | `/api/fields/{id}` | Read / edit name, crop, notes, archived (boundaries are immutable) |
+| POST | `/api/fields/{id}/redraw` | Save an edited boundary as a new field version; archives the old one |
+| POST | `/api/fields/{id}/sync` | Check for new imagery now (otherwise automatic every 12 h) |
+| GET | `/api/geocode?q=` | Place search for the mapper (`lat, lon` or OpenStreetMap Nominatim) |
 | GET | `/api/fields/{id}/scenes?start&end&max_cloud` | Available scenes and whether each is processed |
-| POST | `/api/fields/{id}/process` | Start a background job `{start, end, max_cloud}` → poll `/api/jobs/{job}` |
+| POST | `/api/fields/{id}/process` | Fetch a specific date range `{start, end, max_cloud}` → poll `/api/jobs/{job}` |
 | GET | `/api/fields/{id}/observations` | All observations with stats and provenance |
 | GET | `/api/fields/{id}/observations/{obs}/{layer}.png` | Map overlay (immutable, cacheable) |
 | GET | `/api/fields/{id}/observations/{obs}/hotspots?index=` | Scouting targets |
@@ -122,8 +151,9 @@ Interactive API docs are served at `/docs`.
 
 ```
 $FIELD_MONITOR_DATA/
-  lineage.jsonl                      append-only: every field/observation write, with app version + git commit
-  fields/<field_id>/field.json       boundary (immutable) + editable name/crop/notes/archived
+  lineage.jsonl                      append-only: every field/observation write and sync, with app version + git commit
+  fields/<field_id>/field.json       boundary (immutable) + editable name/crop/notes/archived, replaces/replaced_by links
+  fields/<field_id>/sync.json        last automatic/manual check: window, scenes found, new, clear, errors
   fields/<field_id>/obs/<date>_<scene>_v<processing_version>/
       meta.json                      stats, cloud fractions, grid, provenance (asset URLs, params)
       arrays.npz                     index rasters + masks on the native 10 m UTM grid
@@ -155,9 +185,15 @@ Run on 2026-11-02 against real data: field `OSM_998713335` (230 ac, southern Iow
 - Single-date NDVI zones at peak canopy had breaks 0.919/0.926 (pure noise). This is why
   multi-date zones are the default, and why single-date zones warn on low spread.
 
-Tests: `pytest` runs 38 unit/API tests (index formulas against hand calculations, a planted
+Mapping and auto-update were verified end-to-end in a browser (desktop + mobile touch): a field
+drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, then saved.
+The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
+boundary produced `-v2`. Map and server acreage agree (16.5 ac).
+
+Tests: `pytest` runs 48 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
-logic, store immutability, path-traversal guards). No network is needed.
+logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
+boundary versioning, DJI-style KML/KMZ parsing). No network is needed.
 
 ## Limitations and next steps
 
@@ -167,5 +203,8 @@ logic, store immutability, path-traversal guards). No network is needed.
   surprising date. A better mask (e.g. s2cloudless/OmniCloudMask) would be the next upgrade.
 - Hotspots and zones are relative to each field. They tell you *where* to look, not *why*.
   Ground-truth before applying inputs.
-- Scheduled processing and notifications are left to cron/the Data Pipeline agent via
-  `fieldmonitor process all`.
+- Automatic updates run inside the server process. If the server is down, fields catch up on
+  the next start (each sync overlaps the previous one by 14 days). For server-less setups,
+  cron `fieldmonitor process all` instead.
+- No push/email notifications yet. Alerts show in the app.
+- Zipped shapefiles aren't imported yet. Convert to GeoJSON or KML first.
