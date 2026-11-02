@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Field Monitor</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a9850'/%3E%3Cpath d='M3 12 L8 4 L13 12' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Field Monitor <span class="muted">Sentinel-2 · 10 m</span></div>
+    <button id="toggle-sidebar" class="btn ghost only-mobile" aria-controls="sidebar">Fields</button>
+  </header>
+
+  <div class="layout">
+    <aside id="sidebar" class="sidebar">
+      <section>
+        <div class="row space">
+          <h2>Fields</h2>
+          <label class="check small"><input type="checkbox" id="show-archived"> archived</label>
+        </div>
+        <ul id="field-list" class="field-list" aria-live="polite"></ul>
+        <p id="no-fields" class="muted small" hidden>No fields yet. Draw a boundary on the map or import GeoJSON.</p>
+      </section>
+
+      <section class="card">
+        <h3>Add fields</h3>
+        <div class="row gap">
+          <button id="draw-btn" class="btn">Draw boundary</button>
+          <label class="btn ghost file-btn">Import GeoJSON<input type="file" id="import-file" accept=".geojson,.json,application/geo+json,application/json" hidden></label>
+        </div>
+        <div id="draw-form" class="stack" hidden>
+          <p class="small muted">Click the map to add corners. Double-click or press <b>Finish</b> to close the shape.</p>
+          <label>Name <input id="draw-name" type="text" placeholder="North 80" maxlength="80"></label>
+          <label>Crop <input id="draw-crop" type="text" placeholder="corn" maxlength="40"></label>
+          <div class="row gap">
+            <button id="draw-finish" class="btn primary" disabled>Finish &amp; save</button>
+            <button id="draw-undo" class="btn ghost">Undo point</button>
+            <button id="draw-cancel" class="btn ghost">Cancel</button>
+          </div>
+        </div>
+        <p id="import-msg" class="small" role="status"></p>
+      </section>
+
+      <section class="small muted about">
+        Imagery: Copernicus Sentinel-2 L2A via Earth Search (Element 84). Clouds are masked per field
+        from the scene classification layer. Observations are immutable and versioned.
+        <span id="version"></span>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div id="map" class="map" aria-label="Field map"></div>
+
+      <div class="map-legend" id="map-legend" hidden></div>
+
+      <section id="detail" class="detail" hidden>
+        <div class="detail-head">
+          <div>
+            <h2 id="f-name"></h2>
+            <div class="muted small" id="f-meta"></div>
+          </div>
+          <div class="row gap wrap">
+            <button id="archive-btn" class="btn ghost small-btn">Archive</button>
+          </div>
+        </div>
+
+        <div class="process card">
+          <div class="row gap wrap end">
+            <label>From <input type="date" id="p-start"></label>
+            <label>To <input type="date" id="p-end"></label>
+            <label title="Whole-tile cloud cover filter. Your field is cloud-masked separately, so a loose limit is fine.">Max scene cloud %
+              <input type="number" id="p-cloud" value="60" min="0" max="100" step="5"></label>
+            <button id="process-btn" class="btn primary">Fetch imagery</button>
+          </div>
+          <div id="job" class="job small" role="status" aria-live="polite" hidden>
+            <div class="bar"><div id="job-bar"></div></div>
+            <span id="job-text"></span>
+          </div>
+        </div>
+
+        <div class="controls row gap wrap">
+          <label>Layer
+            <select id="index-select"></select>
+          </label>
+          <label>Date
+            <select id="obs-select"></select>
+          </label>
+          <label class="check"><input type="checkbox" id="show-cloudy"> include cloudy dates</label>
+          <label>Opacity <input type="range" id="opacity" min="0.2" max="1" step="0.05" value="0.9"></label>
+        </div>
+
+        <div id="index-info" class="index-info card small"></div>
+
+        <div id="alerts"></div>
+
+        <div class="card">
+          <div class="row space">
+            <h3 id="chart-title">Season trend</h3>
+            <span class="small muted">Line = field median · band = 10th–90th percentile</span>
+          </div>
+          <div id="chart" class="chart" role="img"></div>
+          <p id="chart-empty" class="small muted" hidden>No clear observations yet. Fetch imagery for a date range.</p>
+        </div>
+
+        <nav class="tabs" role="tablist">
+          <button role="tab" class="tab active" data-tab="scout" aria-selected="true">Scout</button>
+          <button role="tab" class="tab" data-tab="zones" aria-selected="false">Zones</button>
+          <button role="tab" class="tab" data-tab="change" aria-selected="false">Change</button>
+          <button role="tab" class="tab" data-tab="data" aria-selected="false">Data</button>
+        </nav>
+
+        <div class="tabpanel" id="tab-scout">
+          <p class="small muted">Contiguous low patches on the selected date, ranked by size × severity. Each has a GPS point to walk to.</p>
+          <div id="hotspots"></div>
+        </div>
+
+        <div class="tabpanel" id="tab-zones" hidden>
+          <div class="row gap wrap end">
+            <label>Zones <select id="zone-n"><option>2</option><option selected>3</option><option>4</option><option>5</option></select></label>
+            <label>Basis
+              <select id="zone-mode">
+                <option value="multi">All canopy dates (recommended)</option>
+                <option value="single">Selected date only</option>
+              </select>
+            </label>
+            <button id="zones-btn" class="btn">Build zones</button>
+            <button id="zones-dl" class="btn ghost" disabled>Download GeoJSON</button>
+          </div>
+          <div id="zones-out"></div>
+        </div>
+
+        <div class="tabpanel" id="tab-change" hidden>
+          <div class="row gap wrap end">
+            <label>Before <select id="chg-before"></select></label>
+            <label>After <select id="chg-after"></select></label>
+            <label>Flag change ≥ <input type="number" id="chg-thr" value="0.1" step="0.01" min="0.01"></label>
+            <button id="change-btn" class="btn">Compare</button>
+          </div>
+          <div id="change-out"></div>
+        </div>
+
+        <div class="tabpanel" id="tab-data" hidden>
+          <div class="row gap wrap">
+            <a id="csv-link" class="btn ghost" download>Download time series CSV</a>
+          </div>
+          <div class="table-wrap"><table id="obs-table" class="table small"></table></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
