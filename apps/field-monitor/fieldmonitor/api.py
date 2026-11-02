@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import PROCESSING_VERSION, __version__, analysis
+from . import PROCESSING_VERSION, __version__, analysis, qa
 from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
 from .indices import DIVERGING, INDICES, ZONES, describe
@@ -98,8 +98,9 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         except KeyError:
             raise HTTPException(404, f"Unknown field {field_id!r}") from None
 
-    def clear_obs(field_id: str) -> list[dict[str, Any]]:
-        return [o for o in store.list_observations(field_id) if o["status"] == "clear"]
+    def ok_obs(field_id: str) -> list[dict[str, Any]]:
+        """Clear observations that passed QA (no haze or one-pass artifacts)."""
+        return [o for o in qa.classify(store.list_observations(field_id)) if o["qa_status"] == "ok"]
 
     def arrays_or_404(field_id: str, obs_id: str) -> tuple[dict[str, np.ndarray], Any, str, dict[str, Any]]:
         try:
@@ -136,9 +137,10 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     def list_fields(include_archived: bool = False) -> list[dict[str, Any]]:
         out = []
         for f in store.list_fields(include_archived):
-            obs = store.list_observations(f["id"])
+            obs = qa.classify(store.list_observations(f["id"]))
             clear = [o for o in obs if o["status"] == "clear"]
-            latest = clear[-1] if clear else None
+            good = [o for o in clear if o["qa_status"] == "ok"]
+            latest = good[-1] if good else None
             out.append(
                 {
                     **f,
@@ -300,7 +302,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     @app.get("/api/fields/{field_id}/observations")
     def observations(field_id: str) -> list[dict[str, Any]]:
         field_or_404(field_id)
-        return store.list_observations(field_id)
+        return qa.classify(store.list_observations(field_id))
 
     @app.get("/api/fields/{field_id}/observations/{obs_id}/{name}.png")
     def obs_png(field_id: str, obs_id: str, name: str) -> FileResponse:
@@ -332,9 +334,9 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         if obs_id:
             arrays, transform, crs, meta = arrays_or_404(field_id, obs_id)
             return arrays[index], arrays["valid"], transform, crs, [meta["date"]]
-        clear = clear_obs(field_id)
+        clear = ok_obs(field_id)
         if not clear:
-            raise HTTPException(409, "No clear observations yet. Process some imagery first.")
+            raise HTTPException(409, "No clear, good-quality observations yet. Process some imagery first.")
         # Use dates with established canopy, otherwise zones mostly map soil color.
         canopy = [o for o in clear if (o["stats"]["ndvi"]["median"] or 0) >= 0.5]
         chosen = canopy if len(canopy) >= 2 else clear
@@ -396,6 +398,17 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         if ma["grid"] != mb["grid"]:
             raise HTTPException(409, "These dates come from different satellite tiles/grids; pick two dates from the same tile.")
         c = analysis.change(a[index], b[index], a["valid"] & b["valid"], threshold)
+        overlap = round(float(c["valid"].sum()) / max(1, int(a["field"].sum())), 3)
+        ring_a = ((ma.get("qa") or {}).get("ring") or {}).get(index)
+        ring_b = ((mb.get("qa") or {}).get("ring") or {}).get(index)
+        ring_change = round(ring_b - ring_a, 4) if ring_a is not None and ring_b is not None else None
+        notes = []
+        if overlap < 0.7:
+            notes.append(f"Only {overlap:.0%} of the field was clear on both dates; the comparison covers that part only.")
+        for m in (ma, mb):
+            flags = [f for f in qa.classify([dict(m)])[0]["qa_flags"] if f["code"].startswith("haze")]
+            if flags:
+                notes.append(f"{m['date']} looks hazy ({flags[0]['detail']}); its values may read low.")
         lim = max(threshold * 2, 0.2)
         png, bounds = to_web_png(colorize(c["diff"], c["valid"], DIVERGING, -lim, lim), ta, crs_a)
         declines = analysis.hotspots(c["diff"], c["valid"], ta, crs_a, z=1.0, min_delta=threshold)
@@ -413,6 +426,10 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             "png": _png_data_url(png),
             "bounds": bounds,
             "decline_hotspots": declines,
+            "overlap": overlap,
+            "ring_change": ring_change,
+            "field_change": c["stats"]["median"],
+            "notes": notes,
         }
 
     # ---- time series & export ------------------------------------------------
@@ -420,7 +437,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     def alerts(field_id: str, index: str = "ndvi") -> list[dict[str, Any]]:
         field_or_404(field_id)
         index_or_400(index)
-        return analysis.timeseries_alerts(clear_obs(field_id), index)
+        return qa.assess(store, field_id, index)["alerts"]
 
     @app.get("/api/fields/{field_id}/timeseries.csv")
     def timeseries_csv(field_id: str) -> Response:
@@ -429,11 +446,15 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         w = csv.writer(buf)
         metrics = ("median", "mean", "p10", "p90", "cv")
         w.writerow(
-            ["field_id", "date", "scene_id", "status", "field_clear_fraction", "processing_version"]
+            ["field_id", "date", "scene_id", "status", "qa_status", "qa_flags", "aot", "blue_canopy",
+             "field_clear_fraction", "ring_ndvi_median", "processing_version"]
             + [f"{i}_{m}" for i in INDICES for m in metrics]
         )
-        for o in store.list_observations(field_id):
-            row = [f["id"], o["date"], o["scene_id"], o["status"], o["field_clear_fraction"], o["processing_version"]]
+        for o in qa.classify(store.list_observations(field_id)):
+            oqa = o.get("qa") or {}
+            row = [f["id"], o["date"], o["scene_id"], o["status"], o["qa_status"] or "",
+                   ";".join(fl["code"] for fl in o["qa_flags"]), oqa.get("aot", ""), oqa.get("blue_canopy", ""),
+                   o["field_clear_fraction"], (oqa.get("ring") or {}).get("ndvi", ""), o["processing_version"]]
             for i in INDICES:
                 st = o["stats"].get(i) or {}
                 row += [st.get(m, "") if st.get(m) is not None else "" for m in metrics]

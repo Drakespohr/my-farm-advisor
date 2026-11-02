@@ -19,7 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
-from .catalog import search_scenes
+from . import PROCESSING_VERSION
+from .catalog import load_scene, search_scenes
 from .pipeline import process_observation
 from .store import Store, now_iso
 
@@ -131,6 +132,13 @@ class Syncer:
         try:
             before = {o["scene_id"] for o in self.store.list_observations(field["id"])}
             found, job.source = search_scenes(field["geometry"], job.start, job.end, job.max_cloud)
+            # After a processing-version bump, re-run every scene this field already had so
+            # its history reappears under the new version (old results stay on disk).
+            have = before | {s.id for s in found}
+            stale = self.stale_scene_hrefs(field["id"], exclude=have)
+            if stale:
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    found += [s for s in pool.map(self._try_load, stale) if s is not None]
             job.total = len(found)
             job.state = "processing"
 
@@ -163,6 +171,25 @@ class Syncer:
         finally:
             self.store.log("sync.finished", field_id=job.field_id, **{k: v for k, v in job.view().items() if k != "field_id"})
 
+    def stale_scene_hrefs(self, field_id: str, exclude: set[str] | None = None) -> list[str]:
+        exclude = exclude or set()
+        current = {o["scene_id"] for o in self.store.list_observations(field_id)}
+        hrefs = {}
+        for o in self.store.list_observations(field_id, all_versions=True):
+            sid = o.get("scene_id")
+            href = (o.get("provenance") or {}).get("scene_href")
+            if o.get("processing_version") != PROCESSING_VERSION and sid not in current and sid not in exclude and href:
+                hrefs[sid] = href
+        return list(hrefs.values())
+
+    @staticmethod
+    def _try_load(href: str) -> Any:
+        try:
+            return load_scene(href)
+        except Exception as exc:  # scene metadata moved or unreachable; skip it
+            log.warning("could not reload %s: %s", href, exc)
+            return None
+
     def wait(self, job: Job, timeout: float = 600.0) -> None:
         t0 = time.monotonic()
         while job.running and time.monotonic() - t0 < timeout:
@@ -176,6 +203,8 @@ class Syncer:
             last = self.status(f["id"]).get("last_synced")
             if not last or now - datetime.fromisoformat(last) >= timedelta(hours=self.refresh_hours):
                 due.append(f["id"])
+            elif self.stale_scene_hrefs(f["id"]):
+                due.append(f["id"])  # processing upgraded: rebuild history now, not in 12 h
         return due
 
     def _loop(self, poll_seconds: float, startup_delay: float) -> None:

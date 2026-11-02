@@ -110,6 +110,37 @@ orientation aids, not agronomic thresholds. Confirm anything that matters by sco
 6. **Compute every index**, then store per-field stats (mean, median, p10/p90, std, CV), the
    rasters, and Web Mercator PNG overlays.
 
+### Clouds, haze, and anomalies: filtered vs. flagged
+
+The goal is to throw out what the *atmosphere* did and flag what the *crop* did. Layers, in order:
+
+| Layer | What it removes or flags | How |
+|---|---|---|
+| Scene | Hopeless tiles | Skip if >60% cloud across the 110 km tile (kept loose on purpose) |
+| Pixel | Cloud, cirrus, cloud shadow, snow, terrain shadow, bad data | Sen2Cor scene classification, cloud/shadow grown 40 m |
+| Field | Mostly-cloudy dates | <50% of the field clear → `cloudy`: no stats or alerts, photo kept |
+| Date: haze | Thin cloud/smoke/haze the mask missed | Aerosol optical thickness > 0.40 or blue reflectance over canopy > 0.075 → **suspect**; > 0.25 / > 0.060 → caution |
+| Date: transient | Missed cloud/shadow on one pass | Median jumps ≥ 0.08 away from both the previous and next clear pass, which agree within 0.04 → **suspect** |
+| Pair | False change from different clear areas | Dates are compared only on pixels clear on **both**; pairs with <50% common clear ground are skipped |
+
+**Suspect** dates stay in storage, the data table, and the CSV (with reasons), but are left out of
+the trend line, alerts, the field-list headline value, and multi-date zones. They show as hollow
+gray dots on the chart.
+
+A drop on good dates becomes an alert, then:
+
+- **Pending** until a later clear pass exists (typically 2–5 days). **Confirmed** if that pass is
+  still low; **recovered** (info) if not.
+- **Field-specific vs. regional**: the same index is tracked in a ring 30–150 m *outside* the field.
+  If the neighbors fell by ≥60% as much, the change is **regional** (weather, haze, area-wide
+  maturity). If they held steady, it's **this field only** (management, disease, pests, drainage,
+  a hail strip), with a pointer to the hotspot list.
+- **Normal maturity** (info) requires all three: after the seasonal peak, confirmed, and regional.
+  A field-only drop after the peak stays a decline, noting it may be early dry-down.
+
+Thresholds were calibrated on the 2025 test season (see validation notes) and live in
+`pipeline.py` (`HAZE_*`) and `qa.py`.
+
 ### Analyses
 
 - **Scout (hotspots):** contiguous patches more than max(1.5×std, 0.05) below the field median,
@@ -121,9 +152,8 @@ orientation aids, not agronomic thresholds. Confirm anything that matters by sco
   for zones to mean anything.
 - **Change:** per-pixel difference between two dates on the same grid, with the area that
   declined or improved past a threshold and the decline patches.
-- **Alerts:** field-wide median drops of ≥0.08 within 21 days, and rising within-field
-  variability (CV) over a canopy. A drop after the seasonal peak that never recovers is
-  reported as *info* (maturity/harvest), not an alert.
+- **Alerts:** see the section above: drops of ≥0.08 and rising within-field variability (CV)
+  over an established canopy, each pending → confirmed and scoped field vs. regional.
 
 ## API
 
@@ -165,6 +195,8 @@ $FIELD_MONITOR_DATA/
 - Observations are published atomically and never overwritten. Any change to index math,
   masking, resampling, or rendering must bump `PROCESSING_VERSION` in
   `fieldmonitor/__init__.py`. New results then land beside the old ones instead of replacing them.
+  The next sync of each field automatically re-processes every scene it had under the old
+  version, so history reappears without a manual backfill.
 
 ## Validation notes
 
@@ -180,6 +212,12 @@ Run on 2026-11-02 against real data: field `OSM_998713335` (230 ac, southern Iow
   which proved Earth Search had already removed the BOA offset (`boa_offset_applied: true`)
   while `raster:bands` still listed `offset: -0.1`. Fixed in `raster.py`; the flag is recorded
   in each observation's provenance.
+- Haze QA (processing v2), same season: clear days had AOT 0.06–0.15 and blue-over-canopy
+  0.026–0.044. Two dates were flagged suspect: **May 30** (AOT 0.53) and **Sep 14** (blue
+  0.086, 3× normal, with 81% clear, so thin cloud the mask missed). Before QA, Sep 14 produced
+  a "patchiness" watch and an exaggerated 0.42 one-week drop. After QA, the only NDVI alert is
+  Sep 7 → 22: confirmed, regional (neighbors 0.84 → 0.37), normal maturity. Re-running the season
+  at v2 took ~70 s and left the v1 results on disk untouched.
 - NDRE at peak was ~0.78, higher than drone-derived NDRE guides suggest (B05 is at 705 nm),
   so the NDRE display range was set to 0.1–0.8 from this data.
 - Single-date NDVI zones at peak canopy had breaks 0.919/0.926 (pure noise). This is why
@@ -190,17 +228,23 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 48 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 54 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
-boundary versioning, DJI-style KML/KMZ parsing). No network is needed.
+boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel
+comparison, pending/confirmed/recovered, field vs. regional scope, stale-version reprocessing). No network is needed.
 
 ## Limitations and next steps
 
 - Sentinel-2 only. Landsat 8/9 (30 m, thermal) or HLS would add revisit frequency.
   Sentinel-1 radar would see through clouds.
-- Sen2Cor cloud masking misses some thin cloud and haze. Check true color before acting on a
-  surprising date. A better mask (e.g. s2cloudless/OmniCloudMask) would be the next upgrade.
+- Sen2Cor cloud masking misses some thin cloud and haze. The haze and transient checks catch
+  most of what it misses, but the latest date can't be judged transient until the next pass;
+  that's why new declines start as *pending*. A learned cloud mask (s2cloudless/OmniCloudMask)
+  would be the next upgrade.
+- The neighbor ring sees whatever surrounds the field (roads, farmsteads, a different crop).
+  It compares *change*, not level, which tolerates that, but a field surrounded by a crop on a
+  different schedule can make maturity look field-specific.
 - Hotspots and zones are relative to each field. They tell you *where* to look, not *why*.
   Ground-truth before applying inputs.
 - Automatic updates run inside the server process. If the server is down, fields catch up on

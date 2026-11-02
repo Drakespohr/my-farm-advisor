@@ -24,6 +24,47 @@ DEFAULTS = {
 }
 
 
+# Haze thresholds, calibrated on a 2025 Iowa season (field OSM_998713335): clear days had
+# AOT 0.06-0.15 and blue reflectance over dense canopy 0.025-0.045; a visibly hazy day had
+# AOT 0.53, and a thin-cloud day missed by the SCL mask had blue-over-canopy 0.096.
+HAZE_AOT = {"caution": 0.25, "suspect": 0.40}
+HAZE_BLUE_CANOPY = {"caution": 0.060, "suspect": 0.075}
+RING_MIN_PIXELS = 50
+
+
+def _median(a: np.ndarray) -> float | None:
+    a = a[np.isfinite(a)]
+    return round(float(np.median(a)), 4) if a.size else None
+
+
+def observation_qa(stack: Any) -> dict[str, Any]:
+    """Atmospheric quality and neighbor-ring statistics for one clear observation."""
+    b = stack.bands
+    valid = stack.valid
+    ndvi = compute_index("ndvi", b)
+    canopy = valid & (ndvi > 0.6)
+    aot = _median(b["aot"][valid]) if "aot" in b else None
+    blue = _median(b["blue"][canopy]) if canopy.sum() >= RING_MIN_PIXELS else None
+
+    level, reasons = "none", []
+    for lvl in ("suspect", "caution"):
+        if aot is not None and aot > HAZE_AOT[lvl]:
+            reasons.append(f"aerosol optical thickness {aot:.2f} (clear days ≈0.06–0.15)")
+        if blue is not None and blue > HAZE_BLUE_CANOPY[lvl]:
+            reasons.append(f"blue reflectance over canopy {blue:.3f} (clear ≈0.03)")
+        if reasons:
+            level = lvl
+            break
+
+    ring = stack.ring_mask & stack.clear_mask
+    ring_n = int(ring.sum())
+    ring_stats: dict[str, Any] = {"n": ring_n, "clear_fraction": round(ring_n / max(1, int(stack.ring_mask.sum())), 3)}
+    if ring_n >= RING_MIN_PIXELS:
+        for key in INDICES:
+            ring_stats[key] = _median(compute_index(key, b)[ring])
+    return {"aot": aot, "blue_canopy": blue, "haze": level, "haze_reasons": reasons, "ring": ring_stats}
+
+
 def process_observation(store: Store, field: dict[str, Any], scene: Scene, **params: Any) -> dict[str, Any]:
     """Compute and store every index for `field` on `scene`. Idempotent per processing version."""
     p = {**DEFAULTS, **params}
@@ -33,10 +74,11 @@ def process_observation(store: Store, field: dict[str, Any], scene: Scene, **par
     except KeyError:
         pass
 
+    bands = (*REQUIRED_BANDS, "aot") if "aot" in scene.assets else REQUIRED_BANDS
     stack = read_field_stack(
         scene,
         field["geometry"],
-        REQUIRED_BANDS,
+        bands,
         inner_buffer_m=p["inner_buffer_m"],
         cloud_dilation_px=p["cloud_dilation_px"],
         min_clear_fraction=p["min_clear_fraction"],
@@ -55,8 +97,10 @@ def process_observation(store: Store, field: dict[str, Any], scene: Scene, **par
     )
     pngs["truecolor"] = tc_png
 
+    qa: dict[str, Any] = {}
     if status == "clear":
         valid = stack.valid
+        qa = observation_qa(stack)
         arrays["valid"] = valid
         arrays["field"] = stack.field_mask
         for key, idx in INDICES.items():
@@ -82,6 +126,7 @@ def process_observation(store: Store, field: dict[str, Any], scene: Scene, **par
         "field_cloud_fraction": round(stack.cloud_fraction, 4),
         "status": status,
         "stats": stats,
+        "qa": qa,
         "bounds": bounds,
         "grid": {
             "crs": stack.crs,

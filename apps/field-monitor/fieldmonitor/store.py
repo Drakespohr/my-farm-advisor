@@ -21,7 +21,7 @@ import os
 import re
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -93,6 +93,7 @@ def geometry_hash(geometry: dict[str, Any]) -> str:
 @dataclass
 class Store:
     root: Path
+    _array_cache: dict[tuple[str, str], Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def from_env(cls) -> "Store":
@@ -271,6 +272,18 @@ class Store:
         self.log("observation.created", field_id=field_id, obs_id=obs_id, scene_id=meta.get("scene_id"), status=meta.get("status"))
 
     def load_arrays(self, field_id: str, obs_id: str) -> tuple[dict[str, np.ndarray], Affine, str]:
+        # Observations are immutable, so a small in-memory cache is always safe.
+        key = (field_id, obs_id)
+        hit = self._array_cache.get(key)
+        if hit is not None:
+            return hit
+        out = self._load_arrays(field_id, obs_id)
+        if len(self._array_cache) >= 256:
+            self._array_cache.pop(next(iter(self._array_cache)))
+        self._array_cache[key] = out
+        return out
+
+    def _load_arrays(self, field_id: str, obs_id: str) -> tuple[dict[str, np.ndarray], Affine, str]:
         meta = self.get_observation(field_id, obs_id)
         path = self.obs_dir(field_id, obs_id) / "arrays.npz"
         if not path.exists():

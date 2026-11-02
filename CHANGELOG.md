@@ -5,6 +5,7 @@ Docs: https://docs.openclaw.ai
 ## Unreleased
 ### Changes
 
+- Farm/field monitor QA: separate atmospheric artifacts from real crop change: haze detection (aerosol optical thickness + blue-over-canopy), one-pass transient detection, paired-pixel date comparisons, pending/confirmed alerts on the next clear pass, and field-specific vs. regional attribution from a neighbor ring outside the field. Processing version 2; fields re-process their history automatically.
 - Farm/field monitor mapping: drone-mission-style field outlining on satellite imagery (place search, GPS locate, draggable corners, midpoint insert, undo, live acreage, self-intersection check), KML/KMZ import (DJI Pilot, Google Earth), versioned boundary edits, and automatic imagery updates (12-month backfill on save, 12-hourly checks for new passes).
 - Farm/field monitoring: add `apps/field-monitor`, a web app + CLI that monitors fields with Sentinel-2 imagery (NDVI, NDRE, CIre, GNDVI, EVI, SAVI, MSAVI2, NDMI, NDWI, NDTI), with per-field cloud masking, scouting hotspots with GPS points, multi-date management zones, change maps, alerts, CSV export, and immutable versioned observations.
 - Android/chat settings: redesign the chat settings sheet with grouped device and media sections, refresh the Connect and Voice tabs, and tighten the chat composer/session header for a denser mobile layout. (#44894) Thanks @obviyus.

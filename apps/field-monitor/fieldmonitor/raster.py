@@ -53,6 +53,7 @@ class FieldStack:
     scl: np.ndarray  # uint8 scene classification
     field_mask: np.ndarray  # True inside the field (after inner buffer)
     clear_mask: np.ndarray  # True where SCL is clear and data present
+    ring_mask: np.ndarray  # True in the neighbor ring outside the field (see read_field_stack)
     transform: Affine
     crs: str
 
@@ -126,9 +127,10 @@ def read_field_stack(
     geometry_wgs84: dict[str, Any],
     bands: tuple[str, ...],
     inner_buffer_m: float = 10.0,
-    context_m: float = 60.0,
+    context_m: float = 160.0,
     cloud_dilation_px: int = 2,
     min_clear_fraction: float | None = None,
+    ring_m: tuple[float, float] = (30.0, 150.0),
 ) -> FieldStack:
     """Read `bands` + SCL for the field's bounding box (plus `context_m`) at 10 m.
 
@@ -138,6 +140,9 @@ def read_field_stack(
     Sen2Cor tends to under-classify.
     If `min_clear_fraction` is set, SCL is read first; when the field is too cloudy
     only the true-color bands are fetched (enough to show the user why it was skipped).
+    `ring_m` (inner, outer) defines a neighbor ring outside the field. Comparing change
+    inside the field with change in the ring separates field-specific problems from
+    regional ones (weather, haze, area-wide maturity).
     """
     crs = f"EPSG:{scene.epsg}" if scene.epsg else None
     ref_href = scene.assets["red"]["href"]
@@ -169,6 +174,8 @@ def read_field_stack(
     if inner.is_empty or inner.area < 4 * GRID * GRID:
         inner = field_utm  # tiny field: don't buffer it away
     field_mask = ~geometry_mask([mapping(inner)], out_shape=(height, width), transform=transform, all_touched=False)
+    ring_geom = field_utm.buffer(ring_m[1]).difference(field_utm.buffer(ring_m[0]))
+    ring_mask = ~geometry_mask([mapping(ring_geom)], out_shape=(height, width), transform=transform, all_touched=False)
 
     scl = load("scl")[1]
     cloudy = _dilate(np.isin(scl, SCL_CLOUDY), cloud_dilation_px)
@@ -184,4 +191,6 @@ def read_field_stack(
     have_data = np.all([np.isfinite(a) for a in loaded.values()], axis=0)
     clear_mask = scl_clear & have_data
 
-    return FieldStack(bands=loaded, scl=scl, field_mask=field_mask, clear_mask=clear_mask, transform=transform, crs=crs)
+    return FieldStack(
+        bands=loaded, scl=scl, field_mask=field_mask, clear_mask=clear_mask, ring_mask=ring_mask, transform=transform, crs=crs
+    )
