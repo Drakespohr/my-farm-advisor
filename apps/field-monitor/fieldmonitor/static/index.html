@@ -22,25 +22,16 @@
           <label class="check small"><input type="checkbox" id="show-archived"> archived</label>
         </div>
         <ul id="field-list" class="field-list" aria-live="polite"></ul>
-        <p id="no-fields" class="muted small" hidden>No fields yet. Draw a boundary on the map or import GeoJSON.</p>
+        <p id="no-fields" class="muted small" hidden>No fields yet. Tap <b>Map a new field</b> to outline one on the satellite map, or import a KML/GeoJSON file.</p>
       </section>
 
       <section class="card">
         <h3>Add fields</h3>
-        <div class="row gap">
-          <button id="draw-btn" class="btn">Draw boundary</button>
-          <label class="btn ghost file-btn">Import GeoJSON<input type="file" id="import-file" accept=".geojson,.json,application/geo+json,application/json" hidden></label>
+        <div class="stack tight">
+          <button id="new-field-btn" class="btn primary block">＋ Map a new field</button>
+          <label class="btn ghost block file-btn">Import KML / KMZ / GeoJSON<input type="file" id="import-file" accept=".kml,.kmz,.geojson,.json,application/vnd.google-earth.kml+xml,application/vnd.google-earth.kmz,application/geo+json,application/json" hidden></label>
         </div>
-        <div id="draw-form" class="stack" hidden>
-          <p class="small muted">Click the map to add corners. Double-click or press <b>Finish</b> to close the shape.</p>
-          <label>Name <input id="draw-name" type="text" placeholder="North 80" maxlength="80"></label>
-          <label>Crop <input id="draw-crop" type="text" placeholder="corn" maxlength="40"></label>
-          <div class="row gap">
-            <button id="draw-finish" class="btn primary" disabled>Finish &amp; save</button>
-            <button id="draw-undo" class="btn ghost">Undo point</button>
-            <button id="draw-cancel" class="btn ghost">Cancel</button>
-          </div>
-        </div>
+        <p class="small muted">Outline a field on the satellite map like a drone mapping mission, or import boundaries exported from DJI Pilot, Google Earth, or your farm software. Saved fields update automatically.</p>
         <p id="import-msg" class="small" role="status"></p>
       </section>
 
@@ -52,7 +43,39 @@
     </aside>
 
     <main class="main">
-      <div id="map" class="map" aria-label="Field map"></div>
+      <div class="map-wrap">
+        <div id="map" class="map" aria-label="Field map"></div>
+
+        <div id="mapper-top" class="mapper-top" hidden>
+          <form id="search-form" class="search" role="search">
+            <input id="search-input" type="search" placeholder="Search a place, address, or lat, lon" autocomplete="off" aria-label="Search location">
+            <button class="btn" type="submit">Search</button>
+          </form>
+          <button id="locate-btn" class="btn" type="button" title="Go to my location">◎ My location</button>
+          <ul id="search-results" class="search-results" hidden></ul>
+        </div>
+
+        <div id="mapper-sheet" class="mapper-sheet" hidden>
+          <div class="row space">
+            <h3 id="mapper-title">New field</h3>
+            <span id="mapper-stats" class="mapper-stats" aria-live="polite"></span>
+          </div>
+          <p id="mapper-hint" class="small muted"></p>
+          <p id="mapper-warn" class="warning small" hidden></p>
+          <div id="mapper-meta" class="row gap wrap">
+            <label class="grow">Field name <input id="mapper-name" type="text" placeholder="e.g. North 80" maxlength="80"></label>
+            <label>Crop <input id="mapper-crop" type="text" placeholder="corn" maxlength="40" list="crop-list"></label>
+            <datalist id="crop-list"><option>corn</option><option>soybean</option><option>wheat</option><option>cotton</option><option>alfalfa</option><option>sorghum</option><option>canola</option><option>pasture</option></datalist>
+          </div>
+          <div class="row gap wrap mapper-actions">
+            <button id="mapper-undo" class="btn ghost" type="button">↶ Undo</button>
+            <button id="mapper-clear" class="btn ghost" type="button">Clear</button>
+            <span class="grow"></span>
+            <button id="mapper-cancel" class="btn ghost" type="button">Cancel</button>
+            <button id="mapper-save" class="btn primary" type="button" disabled>Save field</button>
+          </div>
+        </div>
+      </div>
 
       <div class="map-legend" id="map-legend" hidden></div>
 
@@ -63,22 +86,33 @@
             <div class="muted small" id="f-meta"></div>
           </div>
           <div class="row gap wrap">
+            <button id="edit-boundary-btn" class="btn ghost small-btn">Edit boundary</button>
             <button id="archive-btn" class="btn ghost small-btn">Archive</button>
           </div>
         </div>
 
         <div class="process card">
-          <div class="row gap wrap end">
-            <label>From <input type="date" id="p-start"></label>
-            <label>To <input type="date" id="p-end"></label>
-            <label title="Whole-tile cloud cover filter. Your field is cloud-masked separately, so a loose limit is fine.">Max scene cloud %
-              <input type="number" id="p-cloud" value="60" min="0" max="100" step="5"></label>
-            <button id="process-btn" class="btn primary">Fetch imagery</button>
+          <div class="row space wrap">
+            <div>
+              <div id="sync-line" class="sync-line"></div>
+              <div id="sync-sub" class="small muted"></div>
+            </div>
+            <button id="sync-btn" class="btn">Check for new imagery</button>
           </div>
           <div id="job" class="job small" role="status" aria-live="polite" hidden>
             <div class="bar"><div id="job-bar"></div></div>
             <span id="job-text"></span>
           </div>
+          <details class="range small">
+            <summary>Fetch a specific date range (older seasons)</summary>
+            <div class="row gap wrap end">
+              <label>From <input type="date" id="p-start"></label>
+              <label>To <input type="date" id="p-end"></label>
+              <label title="Whole-tile cloud cover filter. Your field is cloud-masked separately, so a loose limit is fine.">Max scene cloud %
+                <input type="number" id="p-cloud" value="60" min="0" max="100" step="5"></label>
+              <button id="process-btn" class="btn">Fetch range</button>
+            </div>
+          </details>
         </div>
 
         <div class="controls row gap wrap">

@@ -68,14 +68,18 @@
   const map = L.map("map", { zoomControl: true, doubleClickZoom: false }).setView([41.9, -93.6], 7);
   const basemaps = {
     Satellite: L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-      maxZoom: 19, attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
+      maxZoom: 20, maxNativeZoom: 18, attribution: "Imagery © Esri, Maxar, Earthstar Geographics",
     }),
     Streets: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19, attribution: "© OpenStreetMap contributors",
     }),
   };
+  const labels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 20, maxNativeZoom: 18, attribution: "Labels © Esri",
+  });
   basemaps.Satellite.addTo(map);
-  L.control.layers(basemaps, {}, { position: "bottomright" }).addTo(map);
+  labels.addTo(map);
+  L.control.layers(basemaps, { "Roads & places": labels }, { position: "bottomright" }).addTo(map);
   L.control.scale({ imperial: true, metric: true }).addTo(map);
 
   const fieldsLayer = L.featureGroup().addTo(map);
@@ -111,72 +115,252 @@
     }
   }
 
-  // ---------- drawing ------------------------------------------------------
-  const draw = { active: false, pts: [], line: null, markers: L.layerGroup().addTo(map) };
-  function drawRedraw() {
-    draw.markers.clearLayers();
-    if (draw.line) map.removeLayer(draw.line);
-    draw.pts.forEach((p) => draw.markers.addLayer(L.circleMarker(p, { radius: 4, color: "#fff", weight: 2, fillColor: "#1a7f45", fillOpacity: 1 })));
-    draw.line = draw.pts.length > 1 ? L.polygon(draw.pts, { color: "#fde047", weight: 2, dashArray: "4 4", fillOpacity: 0.1 }).addTo(map) : null;
-    $("draw-finish").disabled = draw.pts.length < 3;
-  }
-  function drawStop() {
-    draw.active = false;
-    draw.pts = [];
-    drawRedraw();
-    $("draw-form").hidden = true;
-    map.getContainer().style.cursor = "";
-  }
-  $("draw-btn").addEventListener("click", () => {
-    draw.active = true;
-    draw.pts = [];
-    drawRedraw();
-    $("draw-form").hidden = false;
-    map.getContainer().style.cursor = "crosshair";
-    $("draw-name").focus();
-  });
-  map.on("click", (e) => {
-    if (!draw.active) return;
-    draw.pts.push([e.latlng.lat, e.latlng.lng]);
-    drawRedraw();
-  });
-  map.on("dblclick", () => { if (draw.active && draw.pts.length >= 3) saveDrawn(); });
-  $("draw-undo").addEventListener("click", () => { draw.pts.pop(); drawRedraw(); });
-  $("draw-cancel").addEventListener("click", drawStop);
-  $("draw-finish").addEventListener("click", saveDrawn);
-  async function saveDrawn() {
-    const ring = draw.pts.map(([lat, lng]) => [lng, lat]);
-    ring.push(ring[0]);
-    const name = $("draw-name").value.trim() || "New field";
-    try {
-      const res = await api("/api/fields", {
-        method: "POST",
-        body: JSON.stringify({ name, crop: $("draw-crop").value.trim() || null, geojson: { type: "Polygon", coordinates: [ring] } }),
-      });
-      drawStop();
-      $("draw-name").value = "";
-      $("draw-crop").value = "";
-      await loadFields();
-      const id = res.created[0] || res.existing[0];
-      if (id) selectField(id);
-    } catch (err) {
-      $("import-msg").textContent = `Could not save: ${err.message}`;
+  // ---------- mapping mode (draw / edit a boundary) -------------------------
+  // Works like a drone mapping mission: tap the satellite map to drop corners, drag corners
+  // to adjust, tap a "+" midpoint to add a corner on an edge, tap a corner to remove it.
+  const mapper = { mode: null, editField: null, pts: [], history: [], layer: L.layerGroup().addTo(map), poly: null, fix: null };
+  const R_EARTH = 6378137;
+  const rad = (d) => (d * Math.PI) / 180;
+
+  function geodesicAreaM2(pts) {
+    if (pts.length < 3) return 0;
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const [lat1, lon1] = pts[i];
+      const [lat2, lon2] = pts[(i + 1) % pts.length];
+      a += rad(lon2 - lon1) * (2 + Math.sin(rad(lat1)) + Math.sin(rad(lat2)));
     }
+    return Math.abs((a * R_EARTH * R_EARTH) / 2);
+  }
+  function perimeterM(pts) {
+    let d = 0;
+    const n = pts.length >= 3 ? pts.length : pts.length - 1;
+    for (let i = 0; i < n; i++) d += L.latLng(pts[i]).distanceTo(L.latLng(pts[(i + 1) % pts.length]));
+    return Math.max(0, d);
+  }
+  function segmentsCross(a, b, c, d) {
+    const o = (p, q, r) => Math.sign((q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1]));
+    return o(a, b, c) !== o(a, b, d) && o(c, d, a) !== o(c, d, b) && o(a, b, c) !== 0 && o(c, d, a) !== 0;
+  }
+  function selfIntersects(pts) {
+    const n = pts.length;
+    if (n < 4) return false;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (Math.abs(i - j) <= 1 || (i === 0 && j === n - 1)) continue; // adjacent edges share a corner
+        if (segmentsCross(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n])) return true;
+      }
+    }
+    return false;
   }
 
+  function snapshot() {
+    mapper.history.push(mapper.pts.map((p) => p.slice()));
+    if (mapper.history.length > 200) mapper.history.shift();
+  }
+  const vertexIcon = (first) => L.divIcon({ className: "", html: `<div class="vertex-icon${first ? " first" : ""}"></div>`, iconSize: [22, 22], iconAnchor: [11, 11] });
+  const midIcon = L.divIcon({ className: "", html: '<div class="mid-icon">+</div>', iconSize: [14, 14], iconAnchor: [7, 7] });
+
+  function mapperRender() {
+    mapper.layer.clearLayers();
+    const pts = mapper.pts;
+    mapper.poly = pts.length >= 3
+      ? L.polygon(pts, { color: "#22c55e", weight: 3, fillColor: "#22c55e", fillOpacity: 0.18, interactive: false })
+      : L.polyline(pts, { color: "#22c55e", weight: 3, dashArray: "6 6", interactive: false });
+    mapper.layer.addLayer(mapper.poly);
+
+    const edges = pts.length >= 3 ? pts.length : pts.length - 1;
+    for (let i = 0; i < edges; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const mid = L.marker([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], { icon: midIcon, draggable: true, title: "Drag or tap to add a corner here", keyboard: false });
+      const insertAt = i + 1;
+      mid.on("click", (e) => { L.DomEvent.stopPropagation(e); snapshot(); pts.splice(insertAt, 0, [mid.getLatLng().lat, mid.getLatLng().lng]); mapperRender(); });
+      mid.on("dragstart", () => snapshot());
+      mid.on("drag", (e) => { const tmp = pts.slice(); tmp.splice(insertAt, 0, [e.latlng.lat, e.latlng.lng]); mapper.poly.setLatLngs(tmp); });
+      mid.on("dragend", () => { const ll = mid.getLatLng(); pts.splice(insertAt, 0, [ll.lat, ll.lng]); mapperRender(); });
+      mapper.layer.addLayer(mid);
+    }
+    pts.forEach((p, i) => {
+      const v = L.marker(p, { icon: vertexIcon(i === 0), draggable: true, title: `Corner ${i + 1}: drag to move, tap to remove`, autoPan: true });
+      v.on("click", (e) => { L.DomEvent.stopPropagation(e); snapshot(); pts.splice(i, 1); mapperRender(); });
+      v.on("dragstart", () => snapshot());
+      v.on("drag", (e) => { pts[i] = [e.latlng.lat, e.latlng.lng]; mapper.poly.setLatLngs(pts); mapperStats(); });
+      v.on("dragend", () => mapperRender());
+      mapper.layer.addLayer(v);
+    });
+    mapperStats();
+  }
+
+  function mapperStats() {
+    const pts = mapper.pts;
+    const ha = geodesicAreaM2(pts) / 1e4;
+    const crosses = selfIntersects(pts);
+    const tooBig = ha > 5000;
+    $("mapper-stats").textContent = pts.length
+      ? `${pts.length} corner${pts.length === 1 ? "" : "s"}${pts.length >= 3 ? ` · ${fmt(ha * 2.471054, 1)} ac (${fmt(ha, 1)} ha)` : ""} · ${fmt(perimeterM(pts) / 1609.344, 2)} mi edge`
+      : "";
+    $("mapper-hint").textContent = pts.length === 0
+      ? "Zoom in on the field, then tap each corner of the field edge in order."
+      : pts.length < 3
+        ? "Keep tapping corners around the field. You need at least 3."
+        : "Drag white corners to adjust · tap + to add a corner on an edge · tap a corner to remove it.";
+    const warn = $("mapper-warn");
+    warn.hidden = !(crosses || tooBig);
+    warn.textContent = crosses ? "Edges cross each other. Drag corners so the outline doesn't overlap itself."
+      : tooBig ? `That's ${fmt(ha * 2.471054, 0)} acres; fields are limited to about 12,000 ac. Zoom in and outline a single field.` : "";
+    $("mapper-save").disabled = pts.length < 3 || crosses || tooBig;
+    $("mapper-undo").disabled = !mapper.history.length;
+  }
+
+  function mapperOpen(mode, field = null) {
+    mapper.mode = mode;
+    mapper.editField = field;
+    mapper.history = [];
+    mapper.pts = [];
+    if (field) {
+      const ring = (field.geometry.type === "Polygon" ? field.geometry.coordinates : field.geometry.coordinates[0])[0];
+      mapper.pts = ring.slice(0, -1).map(([lon, lat]) => [lat, lon]);
+    }
+    document.body.classList.add("mapping");
+    $("sidebar").classList.remove("open");
+    $("mapper-top").hidden = false;
+    $("mapper-sheet").hidden = false;
+    $("mapper-meta").hidden = mode === "edit";
+    $("mapper-title").textContent = mode === "edit" ? `Edit boundary: ${field.name}` : "Map a new field";
+    $("mapper-save").textContent = mode === "edit" ? "Save new boundary" : "Save field";
+    setOverlay(null);
+    markersLayer.clearLayers();
+    if (map.hasLayer(basemaps.Streets)) { map.removeLayer(basemaps.Streets); basemaps.Satellite.addTo(map); }
+    map.getContainer().classList.add("mapping-cursor");
+    map.invalidateSize();
+    if (field) map.fitBounds(L.geoJSON(field.geometry).getBounds(), { padding: [60, 60], animate: false });
+    mapperRender();
+    if (mode === "new") $("search-input").focus();
+  }
+
+  function mapperClose() {
+    mapper.mode = null;
+    mapper.layer.clearLayers();
+    if (mapper.fix) { map.removeLayer(mapper.fix); mapper.fix = null; }
+    document.body.classList.remove("mapping");
+    $("mapper-top").hidden = true;
+    $("mapper-sheet").hidden = true;
+    $("search-results").hidden = true;
+    map.getContainer().classList.remove("mapping-cursor");
+    map.invalidateSize();
+    if (state.field) { showSelected(); map.fitBounds(L.geoJSON(state.field.geometry).getBounds(), { padding: [30, 30], maxZoom: 16, animate: false }); }
+  }
+
+  map.on("click", (e) => {
+    if (!mapper.mode) return;
+    snapshot();
+    mapper.pts.push([e.latlng.lat, e.latlng.lng]);
+    mapperRender();
+  });
+  $("new-field-btn").addEventListener("click", () => mapperOpen("new"));
+  $("edit-boundary-btn").addEventListener("click", () => state.field && mapperOpen("edit", state.field));
+  $("mapper-undo").addEventListener("click", () => { if (mapper.history.length) { mapper.pts = mapper.history.pop(); mapperRender(); } });
+  $("mapper-clear").addEventListener("click", () => { if (mapper.pts.length) { snapshot(); mapper.pts = []; mapperRender(); } });
+  $("mapper-cancel").addEventListener("click", () => {
+    if (mapper.pts.length >= 3 && mapper.mode === "new" && !confirm("Discard this outline?")) return;
+    mapperClose();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!mapper.mode || e.target.matches("input, textarea")) return;
+    if (e.key === "Escape") $("mapper-cancel").click();
+    else if ((e.key === "z" && (e.ctrlKey || e.metaKey)) || e.key === "Backspace") { e.preventDefault(); $("mapper-undo").click(); }
+    else if (e.key === "Enter" && !$("mapper-save").disabled) $("mapper-save").click();
+  });
+
+  $("mapper-save").addEventListener("click", async () => {
+    const ring = mapper.pts.map(([lat, lng]) => [lng, lat]);
+    ring.push(ring[0]);
+    const geojson = { type: "Polygon", coordinates: [ring] };
+    const btn = $("mapper-save");
+    btn.disabled = true;
+    try {
+      let id;
+      if (mapper.mode === "edit") {
+        const res = await api(`/api/fields/${mapper.editField.id}/redraw`, { method: "POST", body: JSON.stringify({ geojson }) });
+        id = res.field.id;
+      } else {
+        const name = $("mapper-name").value.trim() || `Field ${state.fields.length + 1}`;
+        const res = await api("/api/fields", { method: "POST", body: JSON.stringify({ name, crop: $("mapper-crop").value.trim() || null, geojson }) });
+        id = res.created[0] || res.existing[0];
+        $("mapper-name").value = "";
+        $("mapper-crop").value = "";
+      }
+      mapperClose();
+      await loadFields();
+      if (id) await selectField(id);
+      refresh();
+    } catch (err) {
+      const warn = $("mapper-warn");
+      warn.hidden = false;
+      warn.textContent = `Could not save: ${err.message}`;
+      btn.disabled = false;
+    }
+  });
+
+  // Place search and GPS
+  $("search-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const q = $("search-input").value.trim();
+    const list = $("search-results");
+    if (q.length < 2) return;
+    list.hidden = false;
+    list.replaceChildren(el("li", { class: "small muted", text: "Searching…", style: "padding:8px" }));
+    try {
+      const hits = await api(`/api/geocode?q=${encodeURIComponent(q)}`);
+      list.replaceChildren();
+      if (!hits.length) list.append(el("li", { class: "small muted", text: "No matches. Try a town, road, or 'lat, lon'.", style: "padding:8px" }));
+      for (const h of hits) {
+        list.append(el("li", {}, el("button", { type: "button", text: h.name, onclick: () => {
+          list.hidden = true;
+          if (h.bbox) map.fitBounds(h.bbox, { maxZoom: 17 });
+          else map.setView([h.lat, h.lon], 17);
+        } })));
+      }
+    } catch (err) {
+      list.replaceChildren(el("li", { class: "small", text: err.message, style: "padding:8px" }));
+    }
+  });
+  $("locate-btn").addEventListener("click", () => {
+    $("locate-btn").textContent = "◎ Locating…";
+    map.locate({ setView: true, maxZoom: 17, enableHighAccuracy: true, timeout: 15000 });
+  });
+  map.on("locationfound", (e) => {
+    $("locate-btn").textContent = "◎ My location";
+    if (mapper.fix) map.removeLayer(mapper.fix);
+    mapper.fix = L.layerGroup([
+      L.circle(e.latlng, { radius: e.accuracy, color: "#3b82f6", weight: 1, fillOpacity: 0.1, interactive: false }),
+      L.circleMarker(e.latlng, { radius: 7, color: "#fff", weight: 2, fillColor: "#3b82f6", fillOpacity: 1, interactive: false }),
+    ]).addTo(map);
+  });
+  map.on("locationerror", (e) => {
+    $("locate-btn").textContent = "◎ My location";
+    alert(`Couldn't get your location: ${e.message}`);
+  });
+
+  // File import: KML/KMZ (DJI Pilot, Google Earth) or GeoJSON
   $("import-file").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     e.target.value = "";
     if (!file) return;
     const msg = $("import-msg");
-    msg.textContent = "Importing…";
+    msg.textContent = `Importing ${file.name}…`;
     try {
-      const geojson = JSON.parse(await file.text());
-      const res = await api("/api/fields", { method: "POST", body: JSON.stringify({ geojson }) });
-      msg.textContent = `${res.created.length} created, ${res.existing.length} already present` +
-        (res.errors.length ? `, ${res.errors.length} skipped (${res.errors[0].error})` : "");
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+      const res = await api("/api/fields", { method: "POST", body: JSON.stringify({ file_name: file.name, file_b64: btoa(bin) }) });
+      msg.textContent = `${res.created.length} field${res.created.length === 1 ? "" : "s"} added, ${res.existing.length} already present` +
+        (res.errors.length ? `, ${res.errors.length} skipped (${res.errors[0].error})` : "") +
+        (res.created.length ? ". Pulling imagery now." : "");
       await loadFields();
-      fitAllFields();
+      if (res.created.length === 1) await selectField(res.created[0]);
+      else fitAllFields();
+      refresh();
     } catch (err) {
       msg.textContent = `Import failed: ${err.message}`;
     }
@@ -185,6 +369,10 @@
   // ---------- fields -------------------------------------------------------
   async function loadFields() {
     state.fields = await api(`/api/fields?include_archived=${$("show-archived").checked}`);
+    if (state.field) {
+      const fresh = state.fields.find((x) => x.id === state.field.id);
+      if (fresh) { state.field = fresh; renderSync(); }
+    }
     const list = $("field-list");
     list.replaceChildren();
     fieldsLayer.clearLayers();
@@ -198,12 +386,12 @@
       const btn = el("button", { "data-id": f.id, onclick: () => selectField(f.id) },
         el("span", { class: "name", text: f.name + (f.archived ? " (archived)" : "") }),
         el("span", { class: "val" }, sw, latest ? `NDVI ${fmt(latest.ndvi)}` : ""),
-        el("span", { class: "sub", text: `${fmt(f.area_ac, 1)} ac${f.crop ? " · " + f.crop : ""} · ${latest ? "latest clear " + latest.date : "no imagery yet"}` }),
+        el("span", { class: "sub", text: `${fmt(f.area_ac, 1)} ac${f.crop ? " · " + f.crop : ""} · ${syncShort(f)}` }),
       );
       if (state.field && state.field.id === f.id) btn.classList.add("active");
       list.append(el("li", {}, btn));
       const layer = L.geoJSON(f.geometry, { style: { color: "#fde047", weight: 2, fillOpacity: 0 } });
-      layer.on("click", (e) => { if (!draw.active) { L.DomEvent.stopPropagation(e); selectField(f.id); } });
+      layer.on("click", (e) => { if (!mapper.mode) { L.DomEvent.stopPropagation(e); selectField(f.id); } });
       layer.bindTooltip(f.name, { sticky: true });
       fieldsLayer.addLayer(layer);
     }
@@ -216,11 +404,14 @@
   async function selectField(id) {
     const f = state.fields.find((x) => x.id === id) || (await api(`/api/fields/${id}`));
     state.field = f;
+    state.obsPinned = false;
     document.querySelectorAll(".field-list button").forEach((b) => b.classList.toggle("active", b.dataset.id === id));
     $("detail").hidden = false;
     $("f-name").textContent = f.name;
     $("f-meta").textContent = `${f.id} · ${fmt(f.area_ac, 1)} ac (${fmt(f.area_ha, 1)} ha)${f.crop ? " · " + f.crop : ""}`;
     $("archive-btn").textContent = f.archived ? "Unarchive" : "Archive";
+    $("edit-boundary-btn").hidden = Boolean(f.replaced_by);
+    renderSync();
     $("csv-link").href = `/api/fields/${encodeURIComponent(id)}/timeseries.csv`;
     map.fitBounds(L.geoJSON(f.geometry).getBounds(), { padding: [30, 30], maxZoom: 16, animate: false });
     if (location.hash.slice(1) !== id) history.replaceState(null, "", `#${encodeURIComponent(id)}`);
@@ -240,56 +431,101 @@
     else { $("detail").hidden = true; state.field = null; setOverlay(null); }
   });
 
-  // ---------- processing ---------------------------------------------------
-  function initDates() {
-    const today = new Date();
-    const start = new Date(today.getFullYear(), 3, 1); // Apr 1 this season
-    if (start > today) start.setFullYear(today.getFullYear() - 1);
-    $("p-start").value = start.toISOString().slice(0, 10);
-    $("p-end").value = isoToday();
+  // ---------- automatic updates --------------------------------------------
+  function relTime(iso) {
+    if (!iso) return "never";
+    const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min ago`;
+    if (mins < 48 * 60) return `${Math.round(mins / 60)} h ago`;
+    return `${Math.round(mins / 1440)} days ago`;
+  }
+  function jobRunning(f) { return f && f.sync && f.sync.job && ["searching", "processing"].includes(f.sync.job.state); }
+  function syncShort(f) {
+    if (jobRunning(f)) {
+      const j = f.sync.job;
+      return j.state === "searching" ? "finding imagery…" : `updating ${j.done}/${j.total}…`;
+    }
+    const latest = f.latest ? `latest clear ${f.latest.date}` : "no clear imagery yet";
+    return f.sync && f.sync.last_synced ? `${latest} · checked ${relTime(f.sync.last_synced)}` : latest;
   }
 
-  $("process-btn").addEventListener("click", async () => {
-    if (!state.field) return;
-    const btn = $("process-btn");
-    btn.disabled = true;
-    $("job").hidden = false;
-    $("job-text").textContent = "Searching for scenes…";
-    $("job-bar").style.width = "0";
-    try {
-      let job = await api(`/api/fields/${state.field.id}/process`, {
-        method: "POST",
-        body: JSON.stringify({ start: $("p-start").value, end: $("p-end").value, max_cloud: Number($("p-cloud").value) }),
-      });
-      let lastDone = -1;
-      while (job.state === "searching" || job.state === "processing") {
-        await new Promise((r) => setTimeout(r, 1500));
-        job = await api(`/api/jobs/${job.id}`);
-        if (job.total) $("job-bar").style.width = `${(100 * job.done) / job.total}%`;
-        $("job-text").textContent = job.state === "searching"
-          ? "Searching for scenes…"
-          : `Processed ${job.done} of ${job.total} scenes · ${job.clear} clear over this field`;
-        if (job.done !== lastDone && job.done % 4 === 0) { lastDone = job.done; await loadObservations(true); }
-      }
-      $("job-text").textContent = job.state === "done"
-        ? `Done: ${job.total} scenes (${job.clear} clear over the field) via ${job.source}.` + (job.errors.length ? ` ${job.errors.length} failed: ${job.errors[0]}` : "")
-        : `Failed: ${job.errors.join("; ")}`;
-      $("job-bar").style.width = "100%";
-      await loadObservations();
-      await loadFields();
-    } catch (err) {
-      $("job-text").textContent = `Failed: ${err.message}`;
-    } finally {
-      btn.disabled = false;
+  function renderSync() {
+    const f = state.field;
+    if (!f) return;
+    const st = f.sync || {};
+    const job = st.job;
+    const running = jobRunning(f);
+    if (f.replaced_by) {
+      $("sync-line").textContent = `Replaced by a newer boundary (${f.replaced_by}). History kept here.`;
+      $("sync-sub").textContent = "";
+    } else if (running) {
+      $("sync-line").textContent = job.reason === "new-field" ? "Pulling the last 12 months of satellite imagery…" : "Checking for new satellite passes…";
+      $("sync-sub").textContent = `${job.start} → ${job.end}`;
+    } else {
+      $("sync-line").textContent = st.auto_refresh_hours
+        ? `Auto-updates every ${st.auto_refresh_hours} h · last checked ${relTime(st.last_synced)}`
+        : `Last checked ${relTime(st.last_synced)} (automatic updates are off)`;
+      const r = st.last_result;
+      $("sync-sub").textContent = r
+        ? `Last check: ${r.new} new pass${r.new === 1 ? "" : "es"} (${r.clear} clear over this field in the window). Sentinel-2 passes every 2–5 days; cloudy passes are skipped.`
+        : "Sentinel-2 passes every 2–5 days; cloudy passes are skipped automatically.";
+      if (st.last_error) $("sync-sub").textContent += ` Some scenes failed: ${st.last_error}`;
     }
-  });
+    $("sync-btn").disabled = running || Boolean(f.replaced_by);
+    $("process-btn").disabled = running;
+    $("job").hidden = !job;
+    if (job) {
+      $("job-bar").style.width = job.total ? `${(100 * job.done) / job.total}%` : "0";
+      $("job-text").textContent = running
+        ? (job.state === "searching" ? "Searching for satellite passes…" : `Processed ${job.done} of ${job.total} passes · ${job.clear} clear over this field`)
+        : job.state === "done"
+          ? `Done: ${job.total} passes checked, ${job.new} new, ${job.clear} clear.` + (job.errors.length ? ` ${job.errors.length} failed.` : "")
+          : `Failed: ${job.errors.join("; ")}`;
+    }
+  }
+
+  async function startJob(url, body) {
+    try {
+      await api(url, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+      await refresh();
+    } catch (err) {
+      $("job").hidden = false;
+      $("job-text").textContent = `Failed: ${err.message}`;
+    }
+  }
+  $("sync-btn").addEventListener("click", () => state.field && startJob(`/api/fields/${state.field.id}/sync`));
+  $("process-btn").addEventListener("click", () => state.field && startJob(`/api/fields/${state.field.id}/process`, {
+    start: $("p-start").value, end: $("p-end").value, max_cloud: Number($("p-cloud").value),
+  }));
+
+  function initDates() {
+    const today = new Date();
+    $("p-start").value = `${today.getFullYear() - 1}-04-01`;
+    $("p-end").value = `${today.getFullYear() - 1}-11-01`;
+  }
+
+  // Poll for updates: quickly while a job runs, slowly otherwise. Reload the open
+  // field's imagery whenever its observation count changes.
+  let pollTimer = null;
+  async function refresh() {
+    clearTimeout(pollTimer);
+    try {
+      const before = state.field ? state.field.observations : null;
+      if (!mapper.mode) await loadFields();
+      if (state.field && state.field.observations !== before) await loadObservations(true);
+    } catch (_) { /* transient; try again next tick */ }
+    const busy = state.fields.some(jobRunning);
+    pollTimer = setTimeout(refresh, busy ? 3000 : 120000);
+  }
 
   // ---------- observations -------------------------------------------------
   async function loadObservations(keepSelection = false) {
     if (!state.field) return;
     state.obs = await api(`/api/fields/${state.field.id}/observations`);
     const clear = state.obs.filter((o) => o.status === "clear");
-    if (!keepSelection || !state.obs.some((o) => o.id === state.obsId)) {
+    // Follow the newest image unless the user picked a date themselves.
+    if (!keepSelection || !state.obsPinned || !state.obs.some((o) => o.id === state.obsId)) {
       state.obsId = clear.length ? clear[clear.length - 1].id : (state.obs.length ? state.obs[state.obs.length - 1].id : null);
     }
     renderObsSelect();
@@ -315,7 +551,7 @@
     }
     if (state.obsId) sel.value = state.obsId;
   }
-  $("obs-select").addEventListener("change", (e) => { state.obsId = e.target.value; showSelected(); renderChart(); });
+  $("obs-select").addEventListener("change", (e) => { state.obsId = e.target.value; state.obsPinned = true; showSelected(); renderChart(); });
   $("show-cloudy").addEventListener("change", () => { renderObsSelect(); renderChart(); });
 
   function renderIndexSelect() {
@@ -503,6 +739,7 @@
     hit.addEventListener("click", (evt) => {
       const p = nearest(evt);
       state.obsId = p.o.id;
+      state.obsPinned = true;
       $("obs-select").value = p.o.id;
       showSelected();
       renderChart();
@@ -603,7 +840,7 @@
     const keys = state.indices.map((i) => i.key);
     t.append(el("tr", {}, ["Date", "Scene", "Clear", ...state.indices.map((i) => i.name)].map((h) => el("th", { text: h }))));
     for (const o of state.obs.slice().reverse()) {
-      t.append(el("tr", { class: "clickable", onclick: () => { state.obsId = o.id; renderObsSelect(); showSelected(); renderChart(); } },
+      t.append(el("tr", { class: "clickable", onclick: () => { state.obsId = o.id; state.obsPinned = true; renderObsSelect(); showSelected(); renderChart(); } },
         el("td", { text: o.date }),
         el("td", { text: o.scene_id, class: "muted" }),
         el("td", { text: pct(o.field_clear_fraction) }),
@@ -627,6 +864,8 @@
     if (fromHash && state.fields.some((f) => f.id === fromHash)) selectField(fromHash);
     else if (state.fields.length === 1) selectField(state.fields[0].id);
     else fitAllFields();
+    if (!state.fields.length) mapperOpen("new");
+    refresh();
   }
   window.addEventListener("hashchange", () => { const id = decodeURIComponent(location.hash.slice(1)); if (id) selectField(id); });
   boot().catch((err) => { document.body.prepend(el("div", { class: "alert high", text: `Failed to start: ${err.message}` })); });

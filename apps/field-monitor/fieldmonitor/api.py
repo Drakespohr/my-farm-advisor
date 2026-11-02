@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import csv
 import io
 import logging
+import os
+import re
 import threading
-import uuid
+import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator
+from xml.etree.ElementTree import ParseError
+
+import httpx
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -21,11 +27,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import PROCESSING_VERSION, __version__, analysis
+from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
 from .indices import DIVERGING, INDICES, ZONES, describe
-from .pipeline import process_observation
 from .render import classes_rgba, colorize, to_web_png
 from .store import Store, git_commit
+from .sync import Syncer
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -36,7 +43,14 @@ class FieldIn(BaseModel):
     field_id: str | None = None
     crop: str | None = None
     notes: str | None = None
-    geojson: dict[str, Any] = Field(description="Polygon, Feature, or FeatureCollection in WGS84 lon/lat")
+    geojson: dict[str, Any] | None = Field(None, description="Polygon, Feature, or FeatureCollection in WGS84 lon/lat")
+    file_name: str | None = Field(None, description="Uploaded boundary file name (.kml, .kmz, .geojson, .json)")
+    file_b64: str | None = Field(None, description="Base64 file contents, used with file_name")
+    auto_sync: bool = Field(True, description="Start pulling imagery for new fields immediately")
+
+
+class RedrawIn(BaseModel):
+    geojson: dict[str, Any]
 
 
 class FieldPatch(BaseModel):
@@ -52,43 +66,31 @@ class ProcessIn(BaseModel):
     max_cloud: float = Field(60.0, ge=0, le=100, description="Scene-level cloud % filter; field-level masking happens after.")
 
 
-class Job:
-    def __init__(self, field_id: str) -> None:
-        self.id = uuid.uuid4().hex[:12]
-        self.field_id = field_id
-        self.state: Literal["searching", "processing", "done", "error"] = "searching"
-        self.total = 0
-        self.done = 0
-        self.clear = 0
-        self.errors: list[str] = []
-        self.source: str | None = None
-        self.lock = threading.Lock()
-
-    def view(self) -> dict[str, Any]:
-        return {k: getattr(self, k) for k in ("id", "field_id", "state", "total", "done", "clear", "errors", "source")}
-
-
 def _png_data_url(data: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(data).decode()
 
 
-def _parse_features(geojson: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    t = geojson.get("type")
-    if t == "FeatureCollection":
-        return [(f["geometry"], f.get("properties") or {}) for f in geojson.get("features", []) if f.get("geometry")]
-    if t == "Feature":
-        return [(geojson["geometry"], geojson.get("properties") or {})]
-    if t in ("Polygon", "MultiPolygon"):
-        return [(geojson, {})]
-    raise ValueError("Expected a GeoJSON Polygon, MultiPolygon, Feature, or FeatureCollection.")
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+BULK_SYNC_LIMIT = 5  # larger imports are left to the scheduler, which syncs one field at a time
+_COORD = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$")
 
 
-def create_app(store: Store | None = None) -> FastAPI:
+def create_app(store: Store | None = None, refresh_hours: float | None = None) -> FastAPI:
     store = store or Store.from_env()
-    app = FastAPI(title="Field Monitor", version=__version__)
-    jobs: dict[str, Job] = {}
-    jobs_lock = threading.Lock()
-    scene_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="scene")
+    if refresh_hours is None:
+        refresh_hours = float(os.environ.get("FIELD_MONITOR_REFRESH_HOURS", "12"))
+    syncer = Syncer(store, refresh_hours=refresh_hours)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        syncer.start_scheduler()
+        yield
+        syncer.stop()
+
+    app = FastAPI(title="Field Monitor", version=__version__, lifespan=lifespan)
+    app.state.syncer = syncer
+    geocode_lock = threading.Lock()
+    geocode_last = [0.0]
 
     def field_or_404(field_id: str) -> dict[str, Any]:
         try:
@@ -122,6 +124,7 @@ def create_app(store: Store | None = None) -> FastAPI:
             "processing_version": PROCESSING_VERSION,
             "git_commit": git_commit(),
             "data_dir": str(store.root),
+            "auto_refresh_hours": syncer.refresh_hours or None,
         }
 
     @app.get("/api/indices")
@@ -144,6 +147,7 @@ def create_app(store: Store | None = None) -> FastAPI:
                     "latest": {"date": latest["date"], "ndvi": latest["stats"]["ndvi"]["median"], "ndre": latest["stats"]["ndre"]["median"]}
                     if latest
                     else None,
+                    "sync": syncer.status(f["id"]),
                 }
             )
         return out
@@ -151,9 +155,19 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.post("/api/fields", status_code=201)
     def create_fields(body: FieldIn) -> dict[str, Any]:
         try:
-            feats = _parse_features(body.geojson)
-        except (ValueError, KeyError) as exc:
-            raise HTTPException(400, str(exc)) from None
+            if body.file_b64 and body.file_name:
+                raw = base64.b64decode(body.file_b64, validate=True)
+                if len(raw) > MAX_UPLOAD_BYTES:
+                    raise ValueError("File is larger than 20 MB.")
+                feats = parse_file(body.file_name, raw)
+                source = f"upload:{Path(body.file_name).name}"
+            elif body.geojson is not None:
+                feats = parse_geojson(body.geojson)
+                source = "api"
+            else:
+                raise ValueError("Send either geojson or file_name + file_b64.")
+        except (ValueError, KeyError, ParseError, binascii.Error) as exc:
+            raise HTTPException(400, f"Could not read boundaries: {exc}") from None
         if not feats:
             raise HTTPException(400, "No features with geometry found.")
         created, existing, errors = [], [], []
@@ -173,14 +187,72 @@ def create_app(store: Store | None = None) -> FastAPI:
                     field_id=str(fid) if fid else None,
                     crop=body.crop or props.get("crop") or props.get("crop_name"),
                     notes=body.notes,
-                    source="api",
+                    source=source,
                 )
                 (created if is_new else existing).append(rec["id"])
             except (ValueError, FileExistsError) as exc:
                 errors.append({"feature": n, "name": name, "error": str(exc)})
         if errors and not (created or existing):
             raise HTTPException(400, {"errors": errors})
-        return {"created": created, "existing": existing, "errors": errors}
+        syncing = []
+        if body.auto_sync and len(created) <= BULK_SYNC_LIMIT:
+            syncing = [syncer.start(fid, "new-field").id for fid in created]
+        return {"created": created, "existing": existing, "errors": errors, "sync_jobs": syncing}
+
+    @app.post("/api/fields/{field_id}/redraw", status_code=201)
+    def redraw(field_id: str, body: RedrawIn) -> dict[str, Any]:
+        field_or_404(field_id)
+        try:
+            feats = parse_geojson(body.geojson)
+            if len(feats) != 1:
+                raise ValueError("Send exactly one boundary.")
+            new = store.redraw_field(field_id, feats[0][0])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        job = syncer.start(new["id"], "new-field")
+        return {"field": new, "replaced": field_id, "sync_job": job.view()}
+
+    @app.post("/api/fields/{field_id}/sync", status_code=202)
+    def sync_now(field_id: str) -> dict[str, Any]:
+        field_or_404(field_id)
+        return syncer.start(field_id, "manual").view()
+
+    @app.get("/api/geocode")
+    def geocode(q: str = Query(..., min_length=2, max_length=200)) -> list[dict[str, Any]]:
+        """Place search for the mapping screen. Accepts 'lat, lon' or a place name (OpenStreetMap Nominatim)."""
+        m = _COORD.match(q)
+        if m:
+            lat, lon = float(m.group(1)), float(m.group(2))
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return [{"name": f"{lat:.6f}, {lon:.6f}", "lat": lat, "lon": lon, "bbox": None}]
+        # Nominatim's usage policy: identify the app and stay under 1 request/second.
+        with geocode_lock:
+            wait = 1.0 - (time.monotonic() - geocode_last[0])
+            if wait > 0:
+                time.sleep(wait)
+            geocode_last[0] = time.monotonic()
+        try:
+            r = httpx.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": q, "format": "jsonv2", "limit": 6},
+                headers={"User-Agent": f"my-farm-advisor-field-monitor/{__version__}"},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Place search unavailable ({exc.__class__.__name__}). Type coordinates as 'lat, lon' instead.") from None
+        out = []
+        for hit in r.json():
+            bb = hit.get("boundingbox")
+            out.append(
+                {
+                    "name": hit.get("display_name", ""),
+                    "lat": float(hit["lat"]),
+                    "lon": float(hit["lon"]),
+                    "bbox": [[float(bb[0]), float(bb[2])], [float(bb[1]), float(bb[3])]] if bb else None,
+                }
+            )
+        return out
 
     @app.get("/api/fields/{field_id}")
     def get_field(field_id: str) -> dict[str, Any]:
@@ -208,33 +280,6 @@ def create_app(store: Store | None = None) -> FastAPI:
             ],
         }
 
-    def run_job(job: Job, field: dict[str, Any], body: ProcessIn) -> None:
-        try:
-            found, job.source = search_scenes(field["geometry"], body.start, body.end, body.max_cloud)
-            job.total = len(found)
-            job.state = "processing"
-
-            def one(scene: Any) -> None:
-                try:
-                    meta = process_observation(store, field, scene)
-                    if meta["status"] == "clear":
-                        with job.lock:
-                            job.clear += 1
-                except Exception as exc:  # keep going; record per-scene failures
-                    log.exception("scene %s failed", scene.id)
-                    with job.lock:
-                        job.errors.append(f"{scene.id}: {exc}")
-                finally:
-                    with job.lock:
-                        job.done += 1
-
-            list(scene_pool.map(one, found))
-            job.state = "done"
-        except Exception as exc:
-            log.exception("job %s failed", job.id)
-            job.errors.append(str(exc))
-            job.state = "error"
-
     @app.post("/api/fields/{field_id}/process", status_code=202)
     def process(field_id: str, body: ProcessIn) -> dict[str, Any]:
         f = field_or_404(field_id)
@@ -242,15 +287,11 @@ def create_app(store: Store | None = None) -> FastAPI:
             raise HTTPException(400, "end must be on or after start")
         if body.end - body.start > timedelta(days=400):
             raise HTTPException(400, "Process at most ~one season (400 days) per request.")
-        job = Job(field_id)
-        with jobs_lock:
-            jobs[job.id] = job
-        threading.Thread(target=run_job, args=(job, f, body), daemon=True).start()
-        return job.view()
+        return syncer.start(f["id"], "range", body.start, body.end, max_cloud=body.max_cloud).view()
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict[str, Any]:
-        job = jobs.get(job_id)
+        job = syncer.jobs.get(job_id)
         if not job:
             raise HTTPException(404, "Unknown job")
         return job.view()

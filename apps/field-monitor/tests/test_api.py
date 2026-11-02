@@ -25,8 +25,10 @@ def add_obs(store, field_id, date, arr):
 
 
 @pytest.fixture()
-def client(store):
-    return TestClient(create_app(store)), store
+def client(store, monkeypatch):
+    # No network in tests: syncs started by field creation find no scenes.
+    monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda *a, **k: ([], "test"))
+    return TestClient(create_app(store, refresh_hours=0)), store
 
 
 def test_create_and_list_fields(client):
@@ -77,3 +79,49 @@ def test_static_ui_served(client):
     r = c.get("/")
     assert r.status_code == 200 and "Field Monitor" in r.text
     assert c.get("/vendor/leaflet/leaflet.js").status_code == 200
+
+
+def test_new_field_starts_sync_and_redraw_versions(client):
+    c, store = client
+    r = c.post("/api/fields", json={"name": "North 80", "geojson": FIELD}).json()
+    fid = r["created"][0]
+    assert len(r["sync_jobs"]) == 1
+    syncer = c.app.state.syncer
+    syncer.wait(syncer.jobs[r["sync_jobs"][0]])
+    st = next(f for f in c.get("/api/fields").json() if f["id"] == fid)["sync"]
+    assert st["last_synced"] and st["last_reason"] == "new-field"
+
+    smaller = {"type": "Polygon", "coordinates": [[[-93.62, 42.02], [-93.61, 42.02], [-93.61, 42.028], [-93.62, 42.028], [-93.62, 42.02]]]}
+    rd = c.post(f"/api/fields/{fid}/redraw", json={"geojson": smaller}).json()
+    assert rd["field"]["id"] == f"{fid}-v2" and rd["field"]["replaces"] == fid
+    old = c.get(f"/api/fields/{fid}").json()
+    assert old["archived"] and old["replaced_by"] == f"{fid}-v2"
+    assert c.post(f"/api/fields/{fid}/redraw", json={"geojson": smaller}).status_code == 409
+
+
+def test_import_kml_file(client):
+    import base64
+
+    c, _ = client
+    kml = KML_DJI.encode()
+    r = c.post("/api/fields", json={"file_name": "mission.kml", "file_b64": base64.b64encode(kml).decode(), "auto_sync": False})
+    assert r.status_code == 201 and r.json()["created"] == ["east-pivot-" + r.json()["created"][0].split("-")[-1]]
+    bad = c.post("/api/fields", json={"file_name": "x.kml", "file_b64": base64.b64encode(b"<kml/>").decode()})
+    assert bad.status_code == 400
+
+
+def test_geocode_accepts_coordinates_without_network(client):
+    c, _ = client
+    hits = c.get("/api/geocode?q=41.9, -93.6").json()
+    assert hits[0]["lat"] == 41.9 and hits[0]["lon"] == -93.6
+
+
+KML_DJI = """<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:wpml="http://www.dji.com/wpmz/1.0.2">
+  <Document><Folder><Placemark>
+    <name>East Pivot</name>
+    <Polygon><outerBoundaryIs><LinearRing><coordinates>
+      -93.62,42.02,0 -93.608,42.02,0 -93.608,42.029,0 -93.62,42.029,0
+    </coordinates></LinearRing></outerBoundaryIs></Polygon>
+  </Placemark></Folder></Document>
+</kml>"""
