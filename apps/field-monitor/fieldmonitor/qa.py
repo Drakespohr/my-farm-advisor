@@ -26,7 +26,9 @@ from typing import Any
 
 import numpy as np
 
+from .indices import INDICES
 from .store import Store
+from .text import nice_date
 
 MAX_GAP_DAYS = 21
 TRANSIENT_DELTA = 0.08  # departure from both neighbors to call a date transient
@@ -163,13 +165,15 @@ def alerts(store: Store, field_id: str, observations: list[dict[str, Any]], inde
                 "regional": "Neighbors dropped too: likely weather, haze, or crop stage",
                 "unknown": "Can't compare with neighbors (not enough clear ground)",
             }[scope]
-            span = f"{prev['date'][5:]} → {cur['date'][5:]}"
+            span = f"{nice_date(prev['date'])} → {nice_date(cur['date'])}"
+            plain = INDICES[index].plain if index in INDICES else name
+            pct = round(100 * drop / m_prev) if m_prev else 0
             post_peak = i > peak and not recovered_any
             if post_peak and status == "confirmed" and scope == "regional":
                 out.append({**base, "kind": "senescence", "severity": "info", "status": status, "scope": scope, "change": round(-drop, 4),
                             "ring_change": ring, "message": f"{change}. After the seasonal peak with no recovery: consistent with maturity, dry-down, or harvest. {where}",
-                            "title": f"Crop maturing ({name} {m_prev:.2f} → {m_cur:.2f}, {span})",
-                            "points": ["Normal after the season's peak", scope_pt, "No action unless harvest is far off"]})
+                            "title": f"Crop maturing · {span}",
+                            "points": [f"{name} {m_prev:.2f} → {m_cur:.2f} (0–1 scale)", "Normal after the season's peak", scope_pt]})
                 continue
             if status == "pending":
                 severity, lead = "pending", "Possible decline, waiting for the next clear pass to confirm."
@@ -186,8 +190,8 @@ def alerts(store: Store, field_id: str, observations: list[dict[str, Any]], inde
                 action += " If the crop is near maturity, this may turn out to be normal dry-down."
             status_pt = {
                 "pending": "Waiting for the next clear image to confirm",
-                "confirmed": f"Still low on {later[0]['date'][5:]} (confirmed)" if later else "Confirmed",
-                "recovered": f"Bounced back on {later[0]['date'][5:]}" if later else "Recovered",
+                "confirmed": f"Still low on {nice_date(later[0]['date'])} (confirmed)" if later else "Confirmed",
+                "recovered": f"Bounced back on {nice_date(later[0]['date'])}" if later else "Recovered",
             }[status]
             todo = ("Check the low spots in Scout" if status == "confirmed" and scope != "regional"
                     else "Recheck after the next image" if status == "pending"
@@ -197,7 +201,7 @@ def alerts(store: Store, field_id: str, observations: list[dict[str, Any]], inde
                 pts.append("After the season's peak; may be early dry-down")
             out.append({**base, "kind": "decline", "severity": severity, "status": status, "scope": scope, "change": round(-drop, 4),
                         "ring_change": ring, "message": f"{lead} {change}. {where}{action}",
-                        "title": f"{name} dropped {drop:.2f} ({m_prev:.2f} → {m_cur:.2f}, {span})", "points": pts})
+                        "title": f"{plain} fell {pct}% · {span}", "points": [f"{name} {m_prev:.2f} → {m_cur:.2f} (0–1 scale)", *pts]})
 
         pst, st = prev["stats"][index], cur["stats"][index]
         if (
@@ -215,7 +219,7 @@ def alerts(store: Store, field_id: str, observations: list[dict[str, Any]], inde
                         "scope": "field", "message": f"Within-field variability rose (CV {pst['cv']:.2f} → {st['cv']:.2f})"
                         + (" and held on the next pass." if status == "confirmed" else "; waiting for the next clear pass.")
                         + " Check the hotspot list for where to scout.",
-                        "title": f"Field getting patchier ({cur['date'][5:]})",
+                        "title": f"Field getting patchier · {nice_date(cur['date'])}",
                         "points": ["Confirmed on the next image" if status == "confirmed" else "Waiting for the next clear image",
                                    "Check the low spots in Scout"]})
     return out

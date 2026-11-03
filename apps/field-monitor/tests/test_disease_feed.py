@@ -54,7 +54,7 @@ def test_nearby_reports_push_pressure_up_and_decay():
     sr = lambda r: next(d for d in disease.field_pressure(reports=r, **base)["diseases"] if d["key"] == "southern_rust")  # noqa: E731
     with_near = sr(near)
     assert with_near["score"] > 85 and with_near["level"] == "High"
-    assert "14 mi S" in with_near["points"][1]
+    assert "14 miles S, 2 days ago" in with_near["points"][1]
     assert sr(far)["score"] == sr(old)["score"] == 60
 
 
@@ -138,3 +138,11 @@ def test_reports_posts_feed_and_watch(app, store):
     strip = lambda items: [(i["type"], i["id"]) for i in items if i["type"] != "roundup"]  # noqa: E731
     assert strip(a.get("/api/feed").json()) == strip(far.get("/api/feed").json())
     assert far.get(f"/api/fields/{fa}/watch").status_code == 404
+
+
+def test_friendly_text_helpers():
+    from fieldmonitor.text import ago, nice_date
+
+    assert nice_date("2026-07-01", date(2026, 11, 3)) == "Jul 1"
+    assert nice_date("2025-09-07", date(2026, 11, 3)) == "Sep 7, 2025"
+    assert (ago(0), ago(1), ago(5)) == ("today", "yesterday", "5 days ago")

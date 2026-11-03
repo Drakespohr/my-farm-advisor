@@ -100,7 +100,7 @@
 
       <section id="detail" class="detail" hidden>
         <div class="hero card">
-          <div class="hero-main">
+          <div class="hero-top">
             <div class="hero-text">
               <h2 id="f-name"></h2>
               <div class="muted small" id="f-meta"></div>
@@ -109,12 +109,31 @@
                 <button id="sync-btn" class="btn ghost small-btn" title="Check for a new satellite image now">↻ Check now</button>
               </div>
             </div>
-            <div class="hero-side">
-              <div class="score" id="score" aria-live="polite"></div>
-              <div id="pressure-badge" class="pressure-badge" hidden></div>
-            </div>
+            <details class="manage" id="owner-actions">
+              <summary class="btn ghost small-btn">Manage ▾</summary>
+              <div class="menu">
+                <button type="button" id="details-btn">Edit name &amp; crop</button>
+                <button type="button" id="share-btn">Share</button>
+                <button type="button" id="edit-boundary-btn">Edit boundary</button>
+                <button type="button" id="archive-btn">Archive</button>
+              </div>
+            </details>
           </div>
-          <ul id="score-points" class="bullets small"></ul>
+          <div class="glance">
+            <section class="tile" aria-label="Field score">
+              <div class="tile-h">Field score</div>
+              <div class="score" id="score" aria-live="polite"></div>
+            </section>
+            <section class="tile" aria-label="Disease risk">
+              <div class="tile-h">Disease risk</div>
+              <div id="pressure-badge" class="risk"></div>
+            </section>
+            <section class="tile" aria-label="Crop health">
+              <div class="tile-h">Crop health</div>
+              <div id="health" class="health"></div>
+            </section>
+          </div>
+          <ul id="score-points" class="bullets small why"></ul>
           <div class="watch" id="watch" aria-live="polite"></div>
           <div class="row gap wrap hero-actions">
             <button id="report-btn" class="btn ghost small-btn">＋ Report disease or pest</button>
@@ -130,12 +149,6 @@
             <div class="row gap"><button class="btn primary" type="submit">Send report</button><button class="btn ghost" type="button" id="rep-cancel">Cancel</button></div>
             <p id="rep-msg" class="small" role="status"></p>
           </form>
-          <div class="row gap wrap hero-actions" id="owner-actions">
-            <button id="details-btn" class="btn ghost small-btn">Edit details</button>
-            <button id="share-btn" class="btn ghost small-btn">Share</button>
-            <button id="edit-boundary-btn" class="btn ghost small-btn">Edit boundary</button>
-            <button id="archive-btn" class="btn ghost small-btn">Archive</button>
-          </div>
           <div id="share-panel" class="share-panel" hidden>
             <form id="share-form" class="row gap wrap end">
               <label class="grow">Share with (their account email) <input id="share-email" type="email" required placeholder="agronomist@example.com"></label>
