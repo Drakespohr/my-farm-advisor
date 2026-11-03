@@ -5,6 +5,7 @@ Docs: https://docs.openclaw.ai
 ## Unreleased
 ### Changes
 
+- Farm/field monitor: rename the product to **Overacre** (working name) via a single `APP_NAME` constant; the `fieldmonitor` package and command are unchanged.
 - Farm/field monitor platform: accounts (email/password + optional Google), private fields with view-only sharing, a marketplace (profiles, listings, messages) for farmers, agronomists, service providers, dealers, and buyers, and a 0-100 field score vs. cropland within 2 km (ESA WorldCover). Processing version 3.
 - Farm/field monitor UX: plain-language, bullet-point UI (short layer names, one-line status, alert titles with bullets, advanced options tucked away) and explained hotspots: numbered map pins with a pop-up comparing the spot's NDVI/NDRE/NDMI to the field average and listing likely causes with what to check.
 - Farm/field monitor QA: separate atmospheric artifacts from real crop change: haze detection (aerosol optical thickness + blue-over-canopy), one-pass transient detection, paired-pixel date comparisons, pending/confirmed alerts on the next clear pass, and field-specific vs. regional attribution from a neighbor ring outside the field. Processing version 2; fields re-process their history automatically.

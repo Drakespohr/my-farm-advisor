@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import PROCESSING_VERSION, __version__, analysis, diagnose, qa, score as scoring
+from . import APP_NAME, APP_TAGLINE, PROCESSING_VERSION, __version__, analysis, diagnose, qa, score as scoring
 from .accounts import SESSION_COOKIE, Accounts
 from .social import make_router
 from .boundaries import parse_file, parse_geojson
@@ -92,7 +92,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         yield
         syncer.stop()
 
-    app = FastAPI(title="Field Monitor", version=__version__, lifespan=lifespan)
+    app = FastAPI(title=APP_NAME, version=__version__, lifespan=lifespan)
     app.state.syncer = syncer
     accounts = Accounts(store.root / "app.db")
     app.state.accounts = accounts
@@ -152,6 +152,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     def health() -> dict[str, Any]:
         return {
             "ok": True,
+            "app_name": APP_NAME,
+            "tagline": APP_TAGLINE,
             "app_version": __version__,
             "processing_version": PROCESSING_VERSION,
             "git_commit": git_commit(),

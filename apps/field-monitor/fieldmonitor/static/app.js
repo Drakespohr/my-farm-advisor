@@ -1,4 +1,4 @@
-/* Field Monitor web UI. Plain JS + Leaflet; all names from the API are inserted with textContent. */
+/* Overacre web UI (package: fieldmonitor). Plain JS + Leaflet; all names from the API are inserted with textContent. */
 (() => {
   "use strict";
 
@@ -1012,6 +1012,10 @@
   async function boot() {
     initDates();
     const [health, indices] = await Promise.all([api("/api/health"), api("/api/indices")]);
+    FM.appName = health.app_name || "Overacre";
+    FM.tagline = health.tagline || "";
+    document.title = FM.appName;
+    $("brand").textContent = FM.appName;
     $("version").textContent = `v${health.app_version} · processing v${health.processing_version}${health.git_commit ? " · " + health.git_commit.slice(0, 7) : ""}`;
     state.indices = indices;
     state.indexByKey = Object.fromEntries(indices.map((i) => [i.key, i]));
