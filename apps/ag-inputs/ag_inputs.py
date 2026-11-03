@@ -34,6 +34,7 @@ from sqlalchemy import (JSON, CheckConstraint, Date, DateTime, Float, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from auth import get_auth_provider
+import nrd_rules
 
 DATABASE_URL = os.getenv("AG_DATABASE_URL", "sqlite:///ag_monitor.db")
 engine = create_engine(DATABASE_URL, future=True)
@@ -102,6 +103,10 @@ class FieldRow(Base):
     acres: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     # Nullable so fields created before farms existed are kept (assign them with manage.py).
     farm_id: Mapped[Optional[int]] = mapped_column(ForeignKey("farms.id"), nullable=True, index=True)
+    # NRD reporting context (optional): which NRD, its management-area phase, and soil texture.
+    nrd: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    nrd_phase: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    soil_texture: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
 
 
 class SeasonRow(Base):
@@ -325,12 +330,26 @@ class DraftIn(BaseModel):
     content: dict[str, Any]
 
 
+SOIL_TEXTURES = ("sand", "loamy sand", "sandy loam", "loam", "silt loam", "silt", "sandy clay loam",
+                 "clay loam", "silty clay loam", "sandy clay", "silty clay", "clay")  # USDA texture classes
+
+
 class FieldIn(BaseModel):
     farm_id: int
     name: str = Field(min_length=1, max_length=120)
     centroid_lat: float = Field(ge=-90, le=90)
     centroid_lon: float = Field(ge=-180, le=180)
     acres: Optional[float] = Field(default=None, gt=0)
+    nrd: Optional[str] = Field(default=None, description="NRD key from nrd_rules.NRDS")
+    nrd_phase: Optional[int] = Field(default=None, ge=1, le=4, description="Groundwater management area phase")
+    soil_texture: Optional[Literal[SOIL_TEXTURES]] = None  # type: ignore[valid-type]
+
+    @field_validator("nrd")
+    @classmethod
+    def known_nrd(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in nrd_rules.NRDS:
+            raise ValueError(f"Unknown NRD; choose one of {', '.join(nrd_rules.NRDS)}")
+        return value
 
 
 class SeasonIn(BaseModel):
@@ -657,7 +676,8 @@ def list_fields(farm_id: int, db: Session = Depends(get_session), user: UserRow 
     _require(db, user, farm_id, ROLES, "Farm")
     rows = db.scalars(select(FieldRow).where(FieldRow.farm_id == farm_id).order_by(FieldRow.name))
     return [{"id": f.id, "farm_id": f.farm_id, "name": f.name, "centroid_lat": f.centroid_lat,
-             "centroid_lon": f.centroid_lon, "acres": f.acres} for f in rows]
+             "centroid_lon": f.centroid_lon, "acres": f.acres, "nrd": f.nrd, "nrd_phase": f.nrd_phase,
+             "soil_texture": f.soil_texture} for f in rows]
 
 
 @router.post("/fields/{field_id}/seasons", status_code=201)
@@ -743,6 +763,22 @@ def diagnosis_context(
     ).all()
     # Corrections replace the rows they supersede; the output shape is unchanged.
     return build_context(season, effective_events(list(rows)), cutoff)
+
+
+@router.get("/seasons/{season_id}/nrd-check")
+def nrd_check(season_id: int, nrd: Optional[str] = Query(default=None, description="Defaults to the field's NRD"),
+              db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    """Missing records for an NRD's configured requirements (configs are unverified; see README)."""
+    season = _season_for(db, user, season_id)
+    field = db.get(FieldRow, season.field_id)
+    key = nrd or (field.nrd if field else None)
+    if not key:
+        raise HTTPException(422, "Pass ?nrd=... or set the field's NRD")
+    if key not in nrd_rules.NRDS:
+        raise HTTPException(422, f"Unknown NRD; choose one of {', '.join(nrd_rules.NRDS)}")
+    rows = list(db.scalars(select(EventRow).where(EventRow.season_id == season_id).order_by(EventRow.occurred_at)))
+    info = {"nrd_phase": field.nrd_phase, "soil_texture": field.soil_texture} if field else {}
+    return nrd_rules.check_season(season, rows, key, info)
 
 
 # ---- drafts ----------------------------------------------------------------------------
