@@ -27,7 +27,7 @@ import os
 import re
 from typing import Annotated, Any, Literal, Optional, Union, get_args
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import (JSON, CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, String,
                         UniqueConstraint, create_engine, event, select)
@@ -35,6 +35,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from auth import get_auth_provider
 import nrd_rules
+import reports
 
 DATABASE_URL = os.getenv("AG_DATABASE_URL", "sqlite:///ag_monitor.db")
 engine = create_engine(DATABASE_URL, future=True)
@@ -836,6 +837,35 @@ def nrd_check(season_id: int, nrd: Optional[str] = Query(default=None, descripti
     rows = list(db.scalars(select(EventRow).where(EventRow.season_id == season_id).order_by(EventRow.occurred_at)))
     info = {"nrd_phase": field.nrd_phase, "soil_texture": field.soil_texture} if field else {}
     return nrd_rules.check_season(season, rows, key, info)
+
+
+# ---- reports ---------------------------------------------------------------------------
+
+def _season_bundle(db: Session, user: UserRow, season_id: int) -> tuple[FieldRow, SeasonRow, list[EventRow]]:
+    season = _season_for(db, user, season_id)
+    field = db.get(FieldRow, season.field_id)
+    rows = list(db.scalars(select(EventRow).where(EventRow.season_id == season_id)
+                           .order_by(EventRow.occurred_at, EventRow.id)))
+    return field, season, effective_events(rows)
+
+
+@router.get("/seasons/{season_id}/export.csv")
+def export_season_csv(season_id: int, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    """Per-field season export (corrections applied): input for NUE and NRD reports."""
+    field, season, rows = _season_bundle(db, user, season_id)
+    body = reports.to_csv(reports.export_rows(field, season, rows, deadline_info))
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", field.name).strip("_") or f"field{field.id}"
+    return Response(body, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}_{season.year}.csv"'})
+
+
+@router.get("/seasons/{season_id}/n-summary")
+def season_n_summary(season_id: int, nrd: Optional[str] = Query(default=None, description="Defaults to the field's NRD"),
+                     db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    if nrd is not None and nrd not in nrd_rules.NRDS:
+        raise HTTPException(422, f"Unknown NRD; choose one of {', '.join(nrd_rules.NRDS)}")
+    field, season, rows = _season_bundle(db, user, season_id)
+    return reports.n_summary(field, season, rows, nrd)
 
 
 # ---- drafts ----------------------------------------------------------------------------
