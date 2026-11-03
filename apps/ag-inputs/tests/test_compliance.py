@@ -50,7 +50,8 @@ def test_record_due_by_rules():
 
 
 def _season(c):
-    f = c.post("/api/fields", json={"name": "F", "centroid_lat": 41, "centroid_lon": -98}).json()
+    farm = c.post("/api/farms", json={"name": "Farm"}).json()["id"]
+    f = c.post("/api/fields", json={"farm_id": farm, "name": "F", "centroid_lat": 41, "centroid_lon": -98}).json()
     return c.post(f"/api/fields/{f['id']}/seasons", json={"year": 2026, "crop": "corn"}).json()["id"]
 
 

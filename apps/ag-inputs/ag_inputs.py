@@ -22,14 +22,18 @@ Set AG_DATABASE_URL to a Postgres URL (e.g. AWS RDS) for production.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import re
 from typing import Annotated, Any, Literal, Optional, Union
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Integer, String, create_engine, select
+from sqlalchemy import (JSON, CheckConstraint, Date, DateTime, Float, ForeignKey, Integer, String,
+                        UniqueConstraint, create_engine, event, select)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from auth import get_auth_provider
 
 DATABASE_URL = os.getenv("AG_DATABASE_URL", "sqlite:///ag_monitor.db")
 engine = create_engine(DATABASE_URL, future=True)
@@ -54,6 +58,41 @@ class Base(DeclarativeBase):
     pass
 
 
+ROLES = ("owner", "operator", "applicator", "scout", "viewer")
+WRITE_ROLES = ("owner", "operator", "applicator", "scout")  # can log events and drafts
+MANAGE_ROLES = ("owner", "operator")  # can create fields and seasons
+MEMBER_ADMIN_ROLES = ("owner",)  # can add/remove members
+
+
+class UserRow(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), unique=True, index=True)  # identity-provider id
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class FarmRow(Base):
+    __tablename__ = "farms"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class MembershipRow(Base):
+    __tablename__ = "memberships"
+    __table_args__ = (
+        UniqueConstraint("farm_id", "user_id", name="uq_membership_farm_user"),
+        CheckConstraint("role IN ('owner','operator','applicator','scout','viewer')", name="ck_membership_role"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    farm_id: Mapped[int] = mapped_column(ForeignKey("farms.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class FieldRow(Base):
     __tablename__ = "fields"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -61,6 +100,8 @@ class FieldRow(Base):
     centroid_lat: Mapped[float] = mapped_column(Float)
     centroid_lon: Mapped[float] = mapped_column(Float)
     acres: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Nullable so fields created before farms existed are kept (assign them with manage.py).
+    farm_id: Mapped[Optional[int]] = mapped_column(ForeignKey("farms.id"), nullable=True, index=True)
 
 
 class SeasonRow(Base):
@@ -82,6 +123,29 @@ class EventRow(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
     recorded_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    # Append-only: a correction is a new row pointing at the row it replaces.
+    supersedes_id: Mapped[Optional[int]] = mapped_column(ForeignKey("field_events.id"), nullable=True, index=True)
+    entered_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class DraftRow(Base):
+    """Work-in-progress form content, one per user, form type and season."""
+    __tablename__ = "drafts"
+    __table_args__ = (UniqueConstraint("user_id", "form_type", "season_id", name="uq_draft_user_form_season"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"), index=True)
+    form_type: Mapped[str] = mapped_column(String(40))
+    content: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+@event.listens_for(Session, "before_flush")
+def _events_are_append_only(session: Session, flush_context: Any, instances: Any) -> None:
+    """Never update or delete an event row (the database also enforces this with triggers)."""
+    for obj in list(session.dirty) + list(session.deleted):
+        if isinstance(obj, EventRow) and (obj in session.deleted or session.is_modified(obj)):
+            raise ValueError("field_events is append-only: record a correction with supersedes_id instead")
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +305,28 @@ EventPayload = Annotated[
 # Request bodies
 # ---------------------------------------------------------------------------
 
+class FarmIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class MemberIn(BaseModel):
+    email: Optional[str] = Field(default=None, max_length=255)
+    subject: Optional[str] = Field(default=None, max_length=255)
+    role: Literal["owner", "operator", "applicator", "scout", "viewer"]
+
+    @model_validator(mode="after")
+    def one_identifier(self):
+        if not (self.email or self.subject):
+            raise ValueError("Provide the member's email or subject")
+        return self
+
+
+class DraftIn(BaseModel):
+    content: dict[str, Any]
+
+
 class FieldIn(BaseModel):
+    farm_id: int
     name: str = Field(min_length=1, max_length=120)
     centroid_lat: float = Field(ge=-90, le=90)
     centroid_lon: float = Field(ge=-180, le=180)
@@ -259,6 +344,7 @@ class EventIn(BaseModel):
     occurred_at: dt.datetime
     payload: EventPayload
     recorded_by: Optional[str] = Field(default=None, max_length=120, description="Person who made this record")
+    supersedes_id: Optional[int] = Field(default=None, description="Id of the event this record corrects")
 
     @field_validator("occurred_at")
     @classmethod
@@ -410,6 +496,58 @@ def get_session():
         yield session
 
 
+# ---- auth & access ----------------------------------------------------------------
+
+def get_current_user(request: Request, db: Session = Depends(get_session)) -> UserRow:
+    """The authenticated user, created on first sight. Identity comes from auth.get_auth_provider()."""
+    identity = get_auth_provider().authenticate(request)
+    if identity is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = db.scalars(select(UserRow).where(UserRow.subject == identity.subject)).first()
+    if user is None:
+        user = UserRow(subject=identity.subject, email=identity.email, name=identity.name, created_at=_utcnow())
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    elif (identity.email and identity.email != user.email) or (identity.name and identity.name != user.name):
+        user.email = identity.email or user.email
+        user.name = identity.name or user.name
+        db.commit()
+    return user
+
+
+def _role(db: Session, user: UserRow, farm_id: Optional[int]) -> Optional[str]:
+    if farm_id is None:
+        return None
+    m = db.scalars(select(MembershipRow).where(MembershipRow.farm_id == farm_id, MembershipRow.user_id == user.id)).first()
+    return m.role if m else None
+
+
+def _require(db: Session, user: UserRow, farm_id: Optional[int], allowed: tuple[str, ...], what: str) -> str:
+    """Check the user's role on a farm. Non-members get 404 so ids don't leak."""
+    role = _role(db, user, farm_id)
+    if role is None:
+        raise HTTPException(status_code=404, detail=f"{what} not found")
+    if role not in allowed:
+        raise HTTPException(status_code=403, detail=f"Your role ({role}) can't do that here")
+    return role
+
+
+def _field_for(db: Session, user: UserRow, field_id: int, allowed: tuple[str, ...] = ROLES) -> FieldRow:
+    field = db.get(FieldRow, field_id)
+    _require(db, user, field.farm_id if field else None, allowed, "Field")
+    assert field is not None
+    return field
+
+
+def _season_for(db: Session, user: UserRow, season_id: int, allowed: tuple[str, ...] = ROLES) -> SeasonRow:
+    season = db.get(SeasonRow, season_id)
+    field = db.get(FieldRow, season.field_id) if season else None
+    _require(db, user, field.farm_id if field else None, allowed, "Season")
+    assert season is not None
+    return season
+
+
 def _get_season_or_404(db: Session, season_id: int) -> SeasonRow:
     season = db.get(SeasonRow, season_id)
     if season is None:
@@ -417,7 +555,13 @@ def _get_season_or_404(db: Session, season_id: int) -> SeasonRow:
     return season
 
 
-def _event_out(row: EventRow) -> dict[str, Any]:
+def effective_events(rows: list[EventRow]) -> list[EventRow]:
+    """Drop rows that a later correction superseded (keeps the newest version of each record)."""
+    replaced = {r.supersedes_id for r in rows if r.supersedes_id is not None}
+    return [r for r in rows if r.id not in replaced]
+
+
+def _event_out(row: EventRow, superseded_by: Optional[int] = None) -> dict[str, Any]:
     return {
         "id": row.id,
         "season_id": row.season_id,
@@ -425,6 +569,8 @@ def _event_out(row: EventRow) -> dict[str, Any]:
         "occurred_at": row.occurred_at.isoformat(),
         "payload": row.payload,
         "recorded_by": row.recorded_by,
+        "supersedes_id": row.supersedes_id,
+        "superseded_by": superseded_by,
         **deadline_info(row),
     }
 
@@ -432,8 +578,73 @@ def _event_out(row: EventRow) -> dict[str, Any]:
 router = APIRouter(prefix="/api", tags=["field inputs"])
 
 
+# ---- farms & members ----------------------------------------------------------------
+
+@router.post("/farms", status_code=201)
+def create_farm(body: FarmIn, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    farm = FarmRow(name=body.name, created_at=_utcnow())
+    db.add(farm)
+    db.flush()
+    db.add(MembershipRow(farm_id=farm.id, user_id=user.id, role="owner", created_at=_utcnow()))
+    db.commit()
+    return {"id": farm.id, "name": farm.name, "role": "owner"}
+
+
+@router.get("/farms")
+def list_farms(db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    rows = db.execute(select(FarmRow, MembershipRow.role).join(MembershipRow, MembershipRow.farm_id == FarmRow.id)
+                      .where(MembershipRow.user_id == user.id).order_by(FarmRow.name)).all()
+    return [{"id": f.id, "name": f.name, "role": role} for f, role in rows]
+
+
+@router.get("/farms/{farm_id}/members")
+def list_members(farm_id: int, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _require(db, user, farm_id, ROLES, "Farm")
+    rows = db.execute(select(MembershipRow, UserRow).join(UserRow, UserRow.id == MembershipRow.user_id)
+                      .where(MembershipRow.farm_id == farm_id).order_by(UserRow.name)).all()
+    return [{"user_id": u.id, "name": u.name, "email": u.email, "role": m.role} for m, u in rows]
+
+
+@router.post("/farms/{farm_id}/members", status_code=201)
+def set_member(farm_id: int, body: MemberIn, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    """Add a member or change their role. The person must have signed in once."""
+    _require(db, user, farm_id, MEMBER_ADMIN_ROLES, "Farm")
+    stmt = select(UserRow).where(UserRow.subject == body.subject) if body.subject else select(UserRow).where(UserRow.email == body.email)
+    member = db.scalars(stmt).first()
+    if member is None:
+        raise HTTPException(404, "No user with that email/subject yet; they need to sign in once first")
+    m = db.scalars(select(MembershipRow).where(MembershipRow.farm_id == farm_id, MembershipRow.user_id == member.id)).first()
+    if m and m.role == "owner" and body.role != "owner" and _owner_count(db, farm_id) == 1:
+        raise HTTPException(409, "A farm needs at least one owner")
+    if m:
+        m.role = body.role
+    else:
+        db.add(MembershipRow(farm_id=farm_id, user_id=member.id, role=body.role, created_at=_utcnow()))
+    db.commit()
+    return {"user_id": member.id, "role": body.role}
+
+
+@router.delete("/farms/{farm_id}/members/{user_id}", status_code=204)
+def remove_member(farm_id: int, user_id: int, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _require(db, user, farm_id, MEMBER_ADMIN_ROLES, "Farm")
+    m = db.scalars(select(MembershipRow).where(MembershipRow.farm_id == farm_id, MembershipRow.user_id == user_id)).first()
+    if m is None:
+        raise HTTPException(404, "Not a member")
+    if m.role == "owner" and _owner_count(db, farm_id) == 1:
+        raise HTTPException(409, "A farm needs at least one owner")
+    db.delete(m)
+    db.commit()
+
+
+def _owner_count(db: Session, farm_id: int) -> int:
+    return len(db.scalars(select(MembershipRow).where(MembershipRow.farm_id == farm_id, MembershipRow.role == "owner")).all())
+
+
+# ---- fields & seasons --------------------------------------------------------------
+
 @router.post("/fields", status_code=201)
-def create_field(body: FieldIn, db: Session = Depends(get_session)):
+def create_field(body: FieldIn, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _require(db, user, body.farm_id, MANAGE_ROLES, "Farm")
     row = FieldRow(**body.model_dump())
     db.add(row)
     db.commit()
@@ -441,10 +652,17 @@ def create_field(body: FieldIn, db: Session = Depends(get_session)):
     return {"id": row.id, **body.model_dump()}
 
 
+@router.get("/farms/{farm_id}/fields")
+def list_fields(farm_id: int, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _require(db, user, farm_id, ROLES, "Farm")
+    rows = db.scalars(select(FieldRow).where(FieldRow.farm_id == farm_id).order_by(FieldRow.name))
+    return [{"id": f.id, "farm_id": f.farm_id, "name": f.name, "centroid_lat": f.centroid_lat,
+             "centroid_lon": f.centroid_lon, "acres": f.acres} for f in rows]
+
+
 @router.post("/fields/{field_id}/seasons", status_code=201)
-def create_season(field_id: int, body: SeasonIn, db: Session = Depends(get_session)):
-    if db.get(FieldRow, field_id) is None:
-        raise HTTPException(status_code=404, detail="Field not found")
+def create_season(field_id: int, body: SeasonIn, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _field_for(db, user, field_id, MANAGE_ROLES)
     row = SeasonRow(field_id=field_id, **body.model_dump())
     db.add(row)
     db.commit()
@@ -452,15 +670,36 @@ def create_season(field_id: int, body: SeasonIn, db: Session = Depends(get_sessi
     return {"id": row.id, "field_id": field_id, **body.model_dump()}
 
 
+@router.get("/fields/{field_id}/seasons")
+def list_seasons(field_id: int, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _field_for(db, user, field_id)
+    rows = db.scalars(select(SeasonRow).where(SeasonRow.field_id == field_id).order_by(SeasonRow.year.desc()))
+    return [{"id": r.id, "field_id": r.field_id, "year": r.year, "crop": r.crop, "variety": r.variety,
+             "planting_date": r.planting_date.isoformat() if r.planting_date else None} for r in rows]
+
+
+# ---- events (append-only) -----------------------------------------------------------
+
 @router.post("/seasons/{season_id}/events", status_code=201)
-def add_event(season_id: int, body: EventIn, db: Session = Depends(get_session)):
-    _get_season_or_404(db, season_id)
+def add_event(season_id: int, body: EventIn, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _season_for(db, user, season_id, WRITE_ROLES)
+    if body.supersedes_id is not None:
+        original = db.get(EventRow, body.supersedes_id)
+        if original is None or original.season_id != season_id:
+            raise HTTPException(404, "The event being corrected isn't in this season")
+        if original.kind != body.payload.kind:
+            raise HTTPException(422, f"A correction must be the same kind as the original ({original.kind})")
+        newer = db.scalars(select(EventRow).where(EventRow.supersedes_id == original.id)).first()
+        if newer is not None:
+            raise HTTPException(409, f"Event {original.id} was already corrected by event {newer.id}; correct that one instead")
     row = EventRow(
         season_id=season_id,
         kind=body.payload.kind,
         occurred_at=body.occurred_at,
         payload=body.payload.model_dump(mode="json"),
-        recorded_by=body.recorded_by,
+        recorded_by=body.recorded_by or user.name or user.email or user.subject,
+        supersedes_id=body.supersedes_id,
+        entered_by_user_id=user.id,
         created_at=_utcnow(),
     )
     db.add(row)
@@ -473,13 +712,19 @@ def add_event(season_id: int, body: EventIn, db: Session = Depends(get_session))
 def list_events(
     season_id: int,
     kind: Optional[str] = Query(default=None),
+    include_superseded: bool = Query(default=True, description="Also list rows that were later corrected"),
     db: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
 ):
-    _get_season_or_404(db, season_id)
-    stmt = select(EventRow).where(EventRow.season_id == season_id).order_by(EventRow.occurred_at)
+    _season_for(db, user, season_id)
+    stmt = select(EventRow).where(EventRow.season_id == season_id).order_by(EventRow.occurred_at, EventRow.id)
     if kind:
         stmt = stmt.where(EventRow.kind == kind)
-    return [_event_out(r) for r in db.scalars(stmt)]
+    rows = list(db.scalars(stmt))
+    replaced_by = {r.supersedes_id: r.id for r in rows if r.supersedes_id is not None}
+    if not include_superseded:
+        rows = effective_events(rows)
+    return [_event_out(r, replaced_by.get(r.id)) for r in rows]
 
 
 @router.get("/seasons/{season_id}/diagnosis-context")
@@ -487,15 +732,89 @@ def diagnosis_context(
     season_id: int,
     as_of: Optional[dt.datetime] = Query(default=None),
     db: Session = Depends(get_session),
+    user: UserRow = Depends(get_current_user),
 ):
-    season = _get_season_or_404(db, season_id)
+    season = _season_for(db, user, season_id)
     cutoff = _to_naive_utc(as_of) if as_of else _utcnow()
     rows = db.scalars(
         select(EventRow)
         .where(EventRow.season_id == season_id, EventRow.occurred_at <= cutoff)
-        .order_by(EventRow.occurred_at)
+        .order_by(EventRow.occurred_at, EventRow.id)
     ).all()
-    return build_context(season, list(rows), cutoff)
+    # Corrections replace the rows they supersede; the output shape is unchanged.
+    return build_context(season, effective_events(list(rows)), cutoff)
+
+
+# ---- drafts ----------------------------------------------------------------------------
+
+FORM_TYPES = ("planting", "stand_count", "growth_stage", "irrigation", "rainfall", "soil_moisture",
+              "fertilizer", "foliar", "scouting", "soil_test", "harvest")
+MAX_DRAFT_BYTES = 64_000
+
+
+def _form_type_ok(form_type: str) -> None:
+    if form_type not in FORM_TYPES:
+        raise HTTPException(422, f"Unknown form type {form_type!r}")
+
+
+def _draft_out(d: DraftRow, owner: Optional[UserRow] = None, include_content: bool = True) -> dict[str, Any]:
+    out = {"form_type": d.form_type, "season_id": d.season_id, "user_id": d.user_id,
+           "updated_at": d.updated_at.isoformat()}
+    if owner is not None:
+        out["user_name"] = owner.name or owner.email or owner.subject
+    if include_content:
+        out["content"] = d.content
+    return out
+
+
+@router.put("/seasons/{season_id}/drafts/{form_type}")
+def save_draft(season_id: int, form_type: str, body: DraftIn, db: Session = Depends(get_session),
+               user: UserRow = Depends(get_current_user)):
+    _form_type_ok(form_type)
+    _season_for(db, user, season_id, WRITE_ROLES)
+    if len(json.dumps(body.content)) > MAX_DRAFT_BYTES:
+        raise HTTPException(413, "Draft is too large")
+    d = db.scalars(select(DraftRow).where(DraftRow.user_id == user.id, DraftRow.season_id == season_id,
+                                          DraftRow.form_type == form_type)).first()
+    if d is None:
+        d = DraftRow(user_id=user.id, season_id=season_id, form_type=form_type, content=body.content, updated_at=_utcnow())
+        db.add(d)
+    else:
+        d.content = body.content
+        d.updated_at = _utcnow()
+    db.commit()
+    return _draft_out(d)
+
+
+@router.get("/seasons/{season_id}/drafts/{form_type}")
+def load_draft(season_id: int, form_type: str, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _form_type_ok(form_type)
+    _season_for(db, user, season_id)
+    d = db.scalars(select(DraftRow).where(DraftRow.user_id == user.id, DraftRow.season_id == season_id,
+                                          DraftRow.form_type == form_type)).first()
+    if d is None:
+        raise HTTPException(404, "No draft")
+    return _draft_out(d)
+
+
+@router.delete("/seasons/{season_id}/drafts/{form_type}", status_code=204)
+def discard_draft(season_id: int, form_type: str, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    _form_type_ok(form_type)
+    _season_for(db, user, season_id)
+    d = db.scalars(select(DraftRow).where(DraftRow.user_id == user.id, DraftRow.season_id == season_id,
+                                          DraftRow.form_type == form_type)).first()
+    if d is not None:
+        db.delete(d)
+        db.commit()
+
+
+@router.get("/seasons/{season_id}/drafts")
+def list_drafts(season_id: int, db: Session = Depends(get_session), user: UserRow = Depends(get_current_user)):
+    """Everyone's open drafts for the season (who is working on which form). Content only for your own."""
+    _season_for(db, user, season_id)
+    rows = db.execute(select(DraftRow, UserRow).join(UserRow, UserRow.id == DraftRow.user_id)
+                      .where(DraftRow.season_id == season_id).order_by(DraftRow.updated_at.desc())).all()
+    return [_draft_out(d, u, include_content=d.user_id == user.id) for d, u in rows]
 
 
 app = FastAPI(title="Ag field inputs")

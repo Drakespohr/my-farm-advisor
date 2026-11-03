@@ -9,7 +9,8 @@ AS_OF = "2026-07-20T12:00:00"
 
 
 def setup_season(c):
-    f = c.post("/api/fields", json={"name": "North 80", "centroid_lat": 41.1, "centroid_lon": -98.0, "acres": 80}).json()
+    farm = c.post("/api/farms", json={"name": "Test Farm"}).json()["id"]
+    f = c.post("/api/fields", json={"farm_id": farm, "name": "North 80", "centroid_lat": 41.1, "centroid_lon": -98.0, "acres": 80}).json()
     s = c.post(f"/api/fields/{f['id']}/seasons", json={"year": 2026, "crop": "corn", "planting_date": "2026-05-01"}).json()
     return s["id"]
 
@@ -24,6 +25,7 @@ def test_field_season_event_roundtrip(client):
     sid = setup_season(client)
     e = ev(client, sid, "2026-05-01T08:00:00", {"kind": "planting", "population_k_per_ac": 34})
     assert set(e) >= {"id", "season_id", "kind", "occurred_at", "payload"}
+    assert e["recorded_by"] == "Owner"  # defaults to the signed-in user
     assert client.get(f"/api/seasons/{sid}/events?kind=planting").json()[0]["payload"]["population_k_per_ac"] == 34
 
 
