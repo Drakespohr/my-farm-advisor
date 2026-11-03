@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 from typing import Annotated, Any, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
@@ -80,6 +81,7 @@ class EventRow(Base):
     occurred_at: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=_utcnow)
+    recorded_by: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,41 @@ class FoliarApplication(BaseModel):
     wind_mph: Optional[float] = Field(default=None, ge=0, le=100)
     humidity_pct: Optional[float] = Field(default=None, ge=0, le=100)
     applicator: Optional[str] = Field(default=None, max_length=120)
+    # Restricted-use / applicator record-keeping (added; existing fields above are unchanged).
+    epa_reg_number: Optional[str] = Field(default=None, max_length=40, description="EPA Reg. No., e.g. 100-1070 or 100-1070-34704")
+    restricted_use: bool = False
+    applicator_type: Literal["private", "commercial", "noncommercial"] = "private"
+    location: Optional[str] = Field(default=None, max_length=200, description="Where the application was made")
+    area_treated_ac: Optional[float] = Field(default=None, gt=0, le=100_000)
+    start_time: Optional[str] = Field(default=None, description="Application start time, 24-hour HH:MM")
+
+    @field_validator("epa_reg_number")
+    @classmethod
+    def epa_number_format(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        # Format check only: company-product, optionally -distributor (digits).
+        if not re.fullmatch(r"\d{1,7}-\d{1,7}(-\d{1,7})?", value):
+            raise ValueError("EPA Reg. No. looks like 100-1070 or 100-1070-34704")
+        return value
+
+    @field_validator("start_time")
+    @classmethod
+    def hh_mm(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError("start_time must be 24-hour HH:MM, e.g. 07:30")
+        return value
+
+    @model_validator(mode="after")
+    def compliance(self):
+        if self.restricted_use and not self.epa_reg_number:
+            raise ValueError("Restricted-use applications require epa_reg_number")
+        if self.applicator_type in ("commercial", "noncommercial") and self.temp_f is None:
+            raise ValueError("Commercial and noncommercial application records require temp_f")
+        return self
 
 
 class Scouting(BaseModel):
@@ -221,6 +258,7 @@ class SeasonIn(BaseModel):
 class EventIn(BaseModel):
     occurred_at: dt.datetime
     payload: EventPayload
+    recorded_by: Optional[str] = Field(default=None, max_length=120, description="Person who made this record")
 
     @field_validator("occurred_at")
     @classmethod
@@ -229,6 +267,39 @@ class EventIn(BaseModel):
         if value > _utcnow() + dt.timedelta(hours=24):
             raise ValueError("occurred_at cannot be in the future")
         return value
+
+
+# ---------------------------------------------------------------------------
+# Record-keeping deadlines
+# ---------------------------------------------------------------------------
+
+PRIVATE_RUP_RECORD_WINDOW = dt.timedelta(days=14)
+COMMERCIAL_RECORD_WINDOW = dt.timedelta(hours=48)
+
+
+def record_due_by(kind: str, payload: dict[str, Any], occurred_at: dt.datetime) -> Optional[dt.datetime]:
+    """When the application record must be completed, or None if no deadline applies.
+
+    - Private applicators, restricted-use products: 14 days after the application.
+    - Commercial and noncommercial applicators: 48 hours after the application.
+    The application time is the event's occurred_at.
+    """
+    if kind != "foliar":
+        return None
+    applicator_type = payload.get("applicator_type") or "private"
+    if applicator_type in ("commercial", "noncommercial"):
+        return occurred_at + COMMERCIAL_RECORD_WINDOW
+    if payload.get("restricted_use"):
+        return occurred_at + PRIVATE_RUP_RECORD_WINDOW
+    return None
+
+
+def deadline_info(row: "EventRow") -> dict[str, Any]:
+    """{"record_due_by", "recorded_late"} for events with a record deadline, else {}."""
+    due = record_due_by(row.kind, row.payload, row.occurred_at)
+    if due is None:
+        return {}
+    return {"record_due_by": due.isoformat(), "recorded_late": row.created_at > due}
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +424,8 @@ def _event_out(row: EventRow) -> dict[str, Any]:
         "kind": row.kind,
         "occurred_at": row.occurred_at.isoformat(),
         "payload": row.payload,
+        "recorded_by": row.recorded_by,
+        **deadline_info(row),
     }
 
 
@@ -387,6 +460,8 @@ def add_event(season_id: int, body: EventIn, db: Session = Depends(get_session))
         kind=body.payload.kind,
         occurred_at=body.occurred_at,
         payload=body.payload.model_dump(mode="json"),
+        recorded_by=body.recorded_by,
+        created_at=_utcnow(),
     )
     db.add(row)
     db.commit()
