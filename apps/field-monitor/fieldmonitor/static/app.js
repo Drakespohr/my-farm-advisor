@@ -654,6 +654,8 @@
       el("div", { class: "bar", style: `background:${gradient(nd.colormap)}`, role: "img", "aria-label": `NDVI ${fmt(v)} of 1` }, el("i", { style: `left:${pos}%` })),
       el("div", { class: "ends" }, el("span", { text: "bare" }), el("span", { text: "dense" })),
       el("div", { class: "sub", text: `${label[0].toUpperCase()}${label.slice(1)} · image ${niceDate(o.date)}` }));
+    const ageDays = Math.floor((Date.now() - new Date(`${o.date}T12:00:00`)) / 864e5);
+    if (ageDays > 14) box.append(el("div", { class: "sub stale", text: `⚠ This image is ${ageDays} days old` }));
   }
 
   const signed = (v, d = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
@@ -737,7 +739,9 @@
     if (!state.field || state.indexKey === "truecolor") return;
     api(`/api/fields/${state.field.id}/alerts?index=${state.indexKey}`).then((alerts) => {
       const label = { high: "▲ Alert", medium: "● Watch", pending: "◷ Pending", info: "○ Info" };
-      for (const a of alerts.slice(-2).reverse()) {
+      // Only the last two weeks: older alerts stay in history, not on the main view.
+      const cutoff = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10);
+      for (const a of alerts.filter((x) => x.date >= cutoff).slice(-2).reverse()) {
         box.append(el("div", { class: `alert ${a.severity}`, role: "status" },
           el("div", { class: "alert-title" }, el("span", { class: "icon", text: label[a.severity] || "● Watch" }), a.title || a.message),
           a.points ? el("ul", {}, a.points.map((p) => el("li", { text: p }))) : null));
@@ -1126,7 +1130,7 @@
   });
 
   // ---------- routing & boot -----------------------------------------------------
-  const VIEWS = ["auth", "feed", "fields", "market", "messages", "profile"];
+  const VIEWS = ["auth", "today", "feed", "fields", "market", "messages", "profile"];
   function showView(name) {
     for (const v of VIEWS) $(`view-${v}`).hidden = v !== name;
     $("topbar").hidden = name === "auth";
@@ -1154,6 +1158,7 @@
     if (view === "login") { showView("auth"); FM.views.auth(); return; }
     if (view === "market") { showView("market"); FM.views.market(arg); return; }
     if (view === "news" || view === "feed") { showView("feed"); FM.views.news(arg); return; }
+    if (view === "today" || view === "") { showView("today"); FM.views.today(); return; }
     if (view === "messages") { showView("messages"); FM.views.messages(arg); return; }
     if (view === "u" || view === "me") { showView("profile"); FM.views.profile(view === "me" ? state.me.user.id : arg, view === "me"); return; }
     showView("fields");

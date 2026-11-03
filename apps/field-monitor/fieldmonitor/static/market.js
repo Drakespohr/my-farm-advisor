@@ -81,7 +81,7 @@
             : { email: email.value, password: pw.value };
           const me = await api(mode === "signup" ? "/api/auth/register" : "/api/auth/login", { method: "POST", body: JSON.stringify(body) });
           FM.setMe(me);
-          location.hash = "#/fields";
+          location.hash = "#/today";
         } catch (ex) { msg.textContent = ex.message; }
       });
       card.append(form);
@@ -413,6 +413,77 @@
     p.append(el("div", { class: "page-head" }, el("h1", { text: "News" })), prices, chips, composer, list);
     priceBoard(prices).catch((ex) => prices.replaceChildren(el("p", { class: "small muted", text: `Prices unavailable: ${ex.message}` })));
     load();
+  };
+
+  // ---------- today: the daily brief ------------------------------------------------
+  function miniRing(sc) {
+    const r = 18, c = 2 * Math.PI * r;
+    const s = FM.svg("svg", { viewBox: "0 0 44 44", class: `ring mini ${sc && sc.score != null ? FM.scoreClass(sc.score) : ""}`, role: "img",
+      "aria-label": sc && sc.score != null ? `Field score ${sc.score} out of 100` : "No score yet" });
+    s.append(FM.svg("circle", { cx: 22, cy: 22, r, class: "track" }));
+    if (sc && sc.score != null) s.append(FM.svg("circle", { cx: 22, cy: 22, r, class: "fill", "stroke-dasharray": `${(c * sc.score) / 100} ${c}`, transform: "rotate(-90 22 22)" }));
+    const t = FM.svg("text", { x: 22, y: 26, "text-anchor": "middle", class: "num" });
+    t.textContent = sc && sc.score != null ? String(sc.score) : "–";
+    s.append(t);
+    return s;
+  }
+
+  function fieldCard(f) {
+    const img = f.image;
+    const ch = f.change;
+    const risk = f.pressure && f.pressure.score != null ? f.pressure : null;
+    const health = img
+      ? el("div", { class: "fc-health" }, el("b", { text: FM.fmt(img.ndvi) }), el("span", { class: "muted", text: " NDVI (0–1)" }),
+          ch ? el("span", { class: `delta ${ch.delta > 0.02 ? "up" : ch.delta < -0.02 ? "down" : "flat"}`,
+            text: ` ${ch.delta > 0.02 ? "▲" : ch.delta < -0.02 ? "▼" : "■"} ${Math.abs(ch.delta).toFixed(2)} since ${ch.since}` }) : null)
+      : el("div", { class: "fc-health muted", text: "No clear image yet" });
+    const trend = f.trend && f.trend.length > 1 ? sparkline(f.trend.map((t) => t.v)) : null;
+    const scoreText = f.score && f.score.score != null
+      ? `${f.score.label}${f.score.status === "paused" ? ` · final, ${f.score.as_of_label}` : ""}` : "Score after in-season images";
+    return el("a", { class: `card fcard2 p${f.priority}`, href: `#/fields/${encodeURIComponent(f.id)}` },
+      el("div", { class: "row space" }, el("div", {}, el("b", { class: "fc-name", text: f.name }),
+        el("div", { class: "muted small", text: `${FM.fmt(f.area_ac, 0)} ac${f.crop ? " · " + f.crop : ""}${f.role === "viewer" ? " · shared with you" : ""}` })),
+        risk ? chip(`Disease: ${risk.level}`, `risk-${risk.level.toLowerCase()}`) : null),
+      el("div", { class: "fc-row" }, miniRing(f.score), el("div", { class: "small" }, el("div", { text: scoreText }), health)),
+      trend ? el("div", { class: `fc-trend ${ch && ch.delta < -0.02 ? "down" : ""}` }, el("span", { class: "muted small", text: "Season so far" }), trend) : null,
+      el("p", { class: "fc-head", text: f.headline }),
+      el("div", { class: `small ${img && !img.fresh ? "stale" : "muted"}`,
+        text: img ? (img.fresh ? `Latest image ${img.label} · ${img.age_days === 0 ? "today" : img.age_days === 1 ? "yesterday" : `${img.age_days} days ago`}`
+          : `Latest clear image ${img.label}: older than 2 weeks`) : "Imagery is on its way" }));
+  }
+
+  FM.views.today = async () => {
+    const p = page("view-today");
+    p.append(el("p", { class: "muted", text: "Loading your brief…" }));
+    const b = await api("/api/brief");
+    const hour = new Date().getHours();
+    const hello = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+    const first = (b.name || "").split(" ")[0];
+    p.replaceChildren(
+      el("div", { class: "page-head" }, el("h1", { text: `${hello}${first ? ", " + first : ""}` }), el("span", { class: "muted", text: b.date_label })));
+    if (!b.fields.length) {
+      p.append(el("div", { class: "card stack" }, el("p", { text: "Add your first field to start your daily brief." }),
+        el("a", { class: "btn primary", href: "#/fields", text: "＋ Map a field" })));
+      return;
+    }
+    const pr = el("div", { class: "card brief-pri" }, el("h2", { text: "Today's priorities" }));
+    if (b.priorities.length) {
+      pr.append(el("ol", {}, b.priorities.map((x) => el("li", {}, el("a", { href: `#/fields/${encodeURIComponent(x.field_id)}`, text: x.field }), `: ${x.text}`))));
+    } else {
+      pr.append(el("p", { class: "ok", text: "✓ Nothing urgent on your fields. Check back tomorrow." }));
+    }
+    p.append(pr);
+    if (b.prices.commodities.some((c) => c.price != null)) p.append(el("div", { class: "pboard compact" }, ...b.prices.commodities.map(priceCard)));
+    p.append(el("h2", { text: "Your fields" }), el("div", { class: "fgrid" }, ...b.fields.map(fieldCard)));
+    if (b.local.length) {
+      const near = el("div", { class: "card stack" }, el("div", { class: "row space" }, el("h2", { text: "Near you this week" }), el("a", { href: "#/news", class: "small", text: "All news →" })));
+      for (const it of b.local) {
+        if (it.type === "roundup") near.append(el("ul", { class: "bullets small" }, it.points.map((x) => el("li", { text: x }))));
+        else near.append(el("div", { class: "small" }, el("b", { text: it.title || it.body }), el("span", { class: "muted", text: ` · ${when(it.time)}${it.miles != null ? ` · ${it.miles} mi away` : ""}` })));
+      }
+      p.append(near);
+    }
+    p.append(el("p", { class: "small muted", text: `The brief shows the last ${b.recent_days} days. Older images and history stay on each field's chart and Data tab.` }));
   };
 
   // ---------- profiles ----------------------------------------------------------
