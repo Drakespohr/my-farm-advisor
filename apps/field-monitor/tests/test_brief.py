@@ -68,3 +68,36 @@ def test_drop_becomes_a_priority_and_old_alerts_stay_off(client):
     w = c.get(f"/api/fields/{fid}/watch").json()
     assert all("Jan" not in i["title"] or True for i in w["items"])
     assert not [i for i in w["items"] if i["kind"] == "satellite" and d(55)[5:] in i["title"]]
+
+
+def area(median):
+    q = [round(median - 0.2 + 0.02 * i, 3) for i in range(21)]
+    return {"area": {"ndvi_q": q, "ndvi_median": q[10]}, "ring": {"n": 0}}
+
+
+def test_after_harvest_the_brief_reports_the_season_not_alarms(client):
+    c, store = client
+    done = new_field(c, "Harvested")
+    green = new_field(c, "Cover crop", shift=0.05)
+    for fid, late in ((done, 0.22), (green, 0.78)):
+        for days, nd, am in ((100, 0.85, 0.80), (80, 0.90, 0.85), (60, 0.88, 0.82), (30, 0.50, 0.40), (8, late, 0.25)):
+            add_obs(store, fid, d(days), ndvi_field(base=nd if days > 8 else late), qa=area(am))
+    # A nearby severe southern-rust report must not create a November priority.
+    c.post("/api/crop-reports", json={"disease": "southern_rust", "severity": "severe", "field_id": done})
+    b = c.get("/api/brief").json()
+    by = {f["name"]: f for f in b["fields"]}
+    assert by["Harvested"]["season_over"] and by["Harvested"]["headline"].startswith("Season over: final score")
+    assert by["Cover crop"]["headline"].startswith("Still green (NDVI 0.78) after harvest")
+    assert b["priorities"] == []
+    p = c.get(f"/api/fields/{done}/pressure").json()
+    assert p["level"] != "High" and any("season is over" in x for x in p["diseases"][0]["points"])
+
+
+def test_unknown_crop_gets_a_tip_not_a_disease_priority(client):
+    c, store = client
+    geom = mapping(translate(shape(FIELD), xoff=0.1))
+    fid = c.post("/api/fields", json={"name": "Mystery", "geojson": geom, "auto_sync": False}).json()["created"][0]
+    add_obs(store, fid, d(9), ndvi_field(base=0.80))
+    add_obs(store, fid, d(3), ndvi_field(base=0.81))
+    f = c.get("/api/brief").json()["fields"][0]
+    assert "set the crop" in f["headline"] and f["priority"] < 2

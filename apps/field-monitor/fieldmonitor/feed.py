@@ -129,8 +129,11 @@ class Watcher:
         except Exception as exc:  # network down, no station nearby, archive gap
             hours, meta, weather_err = [], {}, str(exc)[:200]
         reports = self.reports_near(lat, lon, as_of=as_of)
+        sc = field_score(qa.classify(self.store.list_observations(field_id)), as_of.isoformat() if as_of else None)
+        season_over = sc.get("status") == "paused"
         result = disease.field_pressure(lat=lat, lon=lon, crop=f.get("crop"), hours=hours, reports=reports,
-                                        canopy_ndvi=canopy, as_of=as_of)
+                                        canopy_ndvi=canopy, as_of=as_of, season_over=season_over)
+        result["season_over"] = season_over
         result.update(weather=summary(hours), weather_source=meta, weather_error=weather_err, canopy_ndvi=canopy)
         if weather_err:
             result["weather_note"] = "Weather data unavailable right now; pressure uses reports only."
@@ -500,12 +503,16 @@ def make_router(
                          for a in qa.alerts(store, f["id"], obs, "ndvi") if a["kind"] != "senescence" and a["date"] >= cutoff][-2:]
 
         # One plain sentence: the most useful thing to know about this field today.
+        season_over = sc.get("status") == "paused"
+        crop_known = disease.crop_kind(f.get("crop")) is not None
+        risk_high = crop_known and not season_over and out["pressure"] and out["pressure"]["level"] == "High" and top_d
+        risk_mod = crop_known and not season_over and out["pressure"] and out["pressure"]["level"] == "Moderate" and top_d
         high = [a for a in out["alerts"] if a["severity"] == "high"]
-        if high:
+        if high and not season_over:
             headline, priority = f"{high[-1]['title']}. Scout the low spots.", 3
-        elif out["pressure"] and out["pressure"]["level"] == "High" and top_d:
+        elif risk_high:
             headline, priority = f"{top_d['name']} risk is high. Look for: {top_d['watch'].lower()}.", 3
-        elif out["alerts"]:
+        elif out["alerts"] and not season_over:
             a = out["alerts"][-1]
             nxt = {"pending": "Waiting for the next clear image to confirm; scout if you're nearby.",
                    "confirmed": "Confirmed on the next image. Scout the low spots.",
@@ -513,9 +520,16 @@ def make_router(
             headline, priority = f"{a['title']}. {nxt}", 1 if a.get("status") == "recovered" else 2
         elif not latest:
             headline, priority = "Waiting for the first clear satellite image.", 1
+        elif season_over:
+            final = f"final score {sc['score']}/100 ({sc['label']}), {nice_date(sc['as_of'], today)}" if sc.get("score") is not None else "no score this season"
+            if out["image"]["ndvi"] >= 0.5:
+                headline = f"Still green (NDVI {out['image']['ndvi']:.2f}) after harvest in your area: cover crop, hay, or late harvest? Season {final}."
+            else:
+                headline = f"Season over: {final}."
+            priority = 0
         elif not fresh:
             headline, priority = f"No clear image in the last {RECENT_DAYS} days (clouds). Last one: {out['image']['label']}.", 1
-        elif out["pressure"] and out["pressure"]["level"] == "Moderate" and top_d:
+        elif risk_mod:
             headline, priority = f"{top_d['name']} risk is moderate. Worth a look on your next pass.", 2
         elif out["change"]:
             c = out["change"]
@@ -525,6 +539,9 @@ def make_router(
             priority = 2 if c["word"] == "less green" else 0
         else:
             headline, priority = f"New image {ago(age or 0)}. Nothing new to act on.", 0
+        if not crop_known and priority < 2 and not season_over:
+            headline += " Tip: set the crop (Manage → Edit name & crop) for disease risk."
+        out["season_over"] = season_over
         out["headline"], out["priority"] = headline, priority
         return out
 
