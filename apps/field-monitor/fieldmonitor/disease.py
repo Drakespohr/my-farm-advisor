@@ -132,6 +132,7 @@ def field_pressure(
     reports: list[dict[str, Any]],
     canopy_ndvi: float | None,
     as_of: date | None = None,
+    season_over: bool = False,
 ) -> dict[str, Any]:
     kind = crop_kind(crop)
     today = as_of or datetime.now(timezone.utc).date()
@@ -148,6 +149,8 @@ def field_pressure(
         raw = 1 - (1 - weather) * (1 - rep)
         ndvi = canopy_ndvi or 0.0
         stage = 0.3 if ndvi < 0.4 else 0.6 if ndvi < 0.7 else 1.0
+        if season_over:  # area-wide harvest/dormancy: foliar diseases no longer matter this year
+            stage = min(stage, 0.3)
         if d.needs_closed_canopy and ndvi < 0.75:
             stage = min(stage, 0.4)
         score = round(100 * raw * stage)
@@ -159,7 +162,9 @@ def field_pressure(
                           + (f"; {len(near) - 1} more nearby" if len(near) > 1 else ""))
         elif reports is not None:
             points.append("No reports nearby in the last 3 weeks")
-        if not established:
+        if season_over:
+            points.append("Growing season is over in your area: risk discounted")
+        elif not established:
             points.append("Crop not established or harvested: pressure discounted")
         elif stage < 1:
             points.append("Canopy not closed yet: pressure discounted")
