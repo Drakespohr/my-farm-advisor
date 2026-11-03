@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 from affine import Affine
-from rasterio.features import shapes
+from rasterio.features import geometry_mask, shapes
 from shapely.geometry import mapping, shape
 
 from .raster import GRID, to_crs
@@ -137,18 +137,13 @@ def hotspots(
 
     out: list[dict[str, Any]] = []
     min_px = max(1, int(round(min_area_ha * M2_PER_HA / (GRID * GRID))))
-    inv = ~transform
     for geom, _ in shapes(low.astype(np.uint8), mask=low, connectivity=8, transform=transform):
         poly = shape(geom)
         n_px = int(round(poly.area / (GRID * GRID)))
         if n_px < min_px:
             continue
-        # Mean index of pixels inside the patch.
-        minx, miny, maxx, maxy = poly.bounds
-        c0, r0 = (int(v) for v in inv * (minx, maxy))
-        c1, r1 = (int(np.ceil(v)) for v in inv * (maxx, miny))
-        sub = arr[r0:r1, c0:c1][low[r0:r1, c0:c1]]
-        mean = float(np.nanmean(sub)) if sub.size else float("nan")
+        mask = low & geometry_mask([geom], out_shape=arr.shape, transform=transform, invert=True)
+        mean = float(np.nanmean(arr[mask])) if mask.any() else float("nan")
         pt = to_crs(poly.representative_point(), crs, "EPSG:4326")
         ha = _area_ha(n_px)
         out.append(
@@ -160,6 +155,9 @@ def hotspots(
                 "mean": round(mean, 4),
                 "deficit": round(med - mean, 4),
                 "geometry": mapping(to_crs(poly, crs, "EPSG:4326")),
+                # Internal (stripped before JSON): exact pixels and UTM shape for diagnosis.
+                "_mask": mask,
+                "_poly": poly,
             }
         )
     out.sort(key=lambda h: h["area_ha"] * h["deficit"], reverse=True)
@@ -206,3 +204,8 @@ def change(
         "improved_ha": round(_area_ha(improved), 2),
         "threshold": decline_threshold,
     }
+
+
+def public(spots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop internal keys (masks, shapes) so hotspots can be returned as JSON."""
+    return [{k: v for k, v in h.items() if not k.startswith("_")} for h in spots]

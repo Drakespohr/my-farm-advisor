@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator
 from xml.etree.ElementTree import ParseError
 
 import httpx
+from shapely.geometry import shape
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -26,10 +27,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import PROCESSING_VERSION, __version__, analysis, qa
+from . import PROCESSING_VERSION, __version__, analysis, diagnose, qa
 from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
 from .indices import DIVERGING, INDICES, ZONES, describe
+from .raster import to_crs
 from .render import classes_rgba, colorize, to_web_png
 from .store import Store, git_commit
 from .sync import Syncer
@@ -320,13 +322,32 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         index_or_400(index)
         arrays, transform, crs, meta = arrays_or_404(field_id, obs_id)
         spots = analysis.hotspots(arrays[index], arrays["valid"], transform, crs, min_area_ha=min_area_ha)
+        if spots:
+            field = store.get_field(field_id)
+            field_utm = to_crs(shape(field["geometry"]), "EPSG:4326", crs)
+            # Earlier good dates on the same grid tell "always low here" from "new".
+            ok = ok_obs(field_id)
+            earlier = [o for o in ok if o["date"] < meta["date"] and o.get("grid") == meta.get("grid")][-8:]
+            history = [(o["date"], store.load_arrays(field_id, o["id"])[0]) for o in earlier]
+            medians = [(o["date"], o["stats"]["ndvi"]["median"] or 0) for o in ok]
+            peak_date = max(medians, key=lambda t: t[1])[0] if medians else None
+            field_ndvi = meta["stats"]["ndvi"]["median"] or 0
+            if peak_date and meta["date"] > peak_date and field_ndvi < 0.85:
+                stage = "late"
+            elif field_ndvi < 0.5:
+                stage = "early"
+            else:
+                stage = "mid"
+            for h in spots:
+                h["explain"] = diagnose.explain(h, arrays, field_utm, history, stage)
         return {
             "obs_id": obs_id,
             "date": meta["date"],
             "index": index,
             "field_median": meta["stats"][index]["median"],
-            "hotspots": spots,
-            "method": "Contiguous patches more than max(1.5 x std, 0.05) below the field median, at least min_area_ha in size.",
+            "field_mean": meta["stats"][index]["mean"],
+            "hotspots": analysis.public(spots),
+            "method": "Patches more than max(1.5 x std, 0.05) below the field median, at least min_area_ha in size.",
         }
 
     # ---- zones ---------------------------------------------------------------
@@ -408,7 +429,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         for m in (ma, mb):
             flags = [f for f in qa.classify([dict(m)])[0]["qa_flags"] if f["code"].startswith("haze")]
             if flags:
-                notes.append(f"{m['date']} looks hazy ({flags[0]['detail']}); its values may read low.")
+                notes.append(f"⚠ {m['date']} was hazy, so its values may read low.")
         lim = max(threshold * 2, 0.2)
         png, bounds = to_web_png(colorize(c["diff"], c["valid"], DIVERGING, -lim, lim), ta, crs_a)
         declines = analysis.hotspots(c["diff"], c["valid"], ta, crs_a, z=1.0, min_delta=threshold)
@@ -425,7 +446,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             "color_limit": lim,
             "png": _png_data_url(png),
             "bounds": bounds,
-            "decline_hotspots": declines,
+            "decline_hotspots": analysis.public(declines),
             "overlap": overlap,
             "ring_change": ring_change,
             "field_change": c["stats"]["median"],

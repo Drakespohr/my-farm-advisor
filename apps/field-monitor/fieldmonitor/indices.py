@@ -148,6 +148,11 @@ class SpectralIndex:
     # These are orientation aids, not agronomic thresholds; scout to confirm.
     guide: list[tuple[float, str]] = field(default_factory=list)
     higher_is: str = "more vigorous canopy"
+    # Plain-language copy for the UI: a few words each.
+    plain: str = ""
+    shows: str = ""
+    use: str = ""
+    watch: str = ""
 
 
 INDICES: dict[str, SpectralIndex] = {
@@ -155,6 +160,10 @@ INDICES: dict[str, SpectralIndex] = {
     for i in [
         SpectralIndex(
             key="ndvi",
+            plain="Crop health",
+            shows="How much green crop is there",
+            use="Emergence until the crop canopy closes",
+            watch="Tops out in thick crops; switch to NDRE mid-season",
             name="NDVI",
             formula="(B08 − B04) / (B08 + B04)",
             bands=("nir", "red"),
@@ -168,6 +177,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="ndre",
+            plain="Nitrogen / chlorophyll",
+            shows="How green the leaves are in a thick crop",
+            use="Mid to late season; nitrogen decisions",
+            watch="Compare spots in this field, not between fields",
             name="NDRE",
             formula="(B8A − B05) / (B8A + B05)",
             bands=("nir08", "rededge1"),
@@ -182,6 +195,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="cire",
+            plain="Chlorophyll amount",
+            shows="How much chlorophyll the crop holds",
+            use="Nitrogen checks against a well-fed strip",
+            watch="No fixed scale; compare areas",
             name="CIre",
             formula="B07 / B05 − 1",
             bands=("rededge3", "rededge1"),
@@ -196,6 +213,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="gndvi",
+            plain="Greenness, fine detail",
+            shows="Leaf greenness at full 10 m detail",
+            use="Mid-season",
+            watch="Mixes plant size and color",
             name="GNDVI",
             formula="(B08 − B03) / (B08 + B03)",
             bands=("nir", "green"),
@@ -209,6 +230,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="evi",
+            plain="Crop health, thick crops",
+            shows="Crop mass without topping out",
+            use="Dense crops and hazy days",
+            watch="Thrown off by leftover cloud",
             name="EVI",
             formula="2.5 (B08 − B04) / (B08 + 6 B04 − 7.5 B02 + 1)",
             bands=("nir", "red", "blue"),
@@ -222,6 +247,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="savi",
+            plain="Early stand",
+            shows="Young crop, ignoring soil color",
+            use="Under ~40% ground cover",
+            watch="Little use once the canopy closes",
             name="SAVI",
             formula="1.5 (B08 − B04) / (B08 + B04 + 0.5)",
             bands=("nir", "red"),
@@ -235,6 +264,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="msavi",
+            plain="Emergence",
+            shows="Very small plants and cover crops",
+            use="Right after emergence",
+            watch="Little use once the canopy closes",
             name="MSAVI2",
             formula="(2 B08 + 1 − √((2 B08 + 1)² − 8 (B08 − B04))) / 2",
             bands=("nir", "red"),
@@ -248,6 +281,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="ndmi",
+            plain="Crop water",
+            shows="Water in the leaves",
+            use="Drought, irrigation gaps, dry-down",
+            watch="Plant water, not soil moisture",
             name="NDMI",
             formula="(B8A − B11) / (B8A + B11)",
             bands=("nir08", "swir16"),
@@ -262,6 +299,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="ndwi",
+            plain="Standing water",
+            shows="Ponding and flooding",
+            use="After heavy rain",
+            watch="Above 0 usually means water",
             name="NDWI",
             formula="(B03 − B08) / (B03 + B08)",
             bands=("green", "nir"),
@@ -276,6 +317,10 @@ INDICES: dict[str, SpectralIndex] = {
         ),
         SpectralIndex(
             key="ndti",
+            plain="Crop residue",
+            shows="Residue left on bare ground",
+            use="After harvest or before planting",
+            watch="Only works with no green crop",
             name="NDTI",
             formula="(B11 − B12) / (B11 + B12)",
             bands=("swir16", "swir22"),
@@ -314,4 +359,8 @@ def describe(index: SpectralIndex) -> dict[str, object]:
         "caveats": index.caveats,
         "guide": [[v, label] for v, label in index.guide],
         "higher_is": index.higher_is,
+        "plain": index.plain,
+        "shows": index.shows,
+        "use": index.use,
+        "watch": index.watch,
     }
