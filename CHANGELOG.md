@@ -5,6 +5,7 @@ Docs: https://docs.openclaw.ai
 ## Unreleased
 ### Changes
 
+- Overacre News: the Feed becomes News with a corn/soybean/wheat price board (manual/admin entry, CSV import, optional licensed Barchart futures), Local (county-labeled reports, NOAA storm reports near your fields, weekly roundup) and National (RSS headlines) sections, and source health for admins.
 - Overacre: disease pressure per field (southern rust, tar spot, gray leaf spot, NCLB, white mold, frogeye) from weather (NWS / optional Open-Meteo / NOAA ISD history), nearby community field reports, and crop stage; a "Things to watch" list under the field score; field reports with ~1 km location rounding; and a news feed of posts, reports, listings, and field alerts with helpful votes and comments.
 - Farm/field monitor: rename the product to **Overacre** (working name) via a single `APP_NAME` constant; the `fieldmonitor` package and command are unchanged.
 - Farm/field monitor platform: accounts (email/password + optional Google), private fields with view-only sharing, a marketplace (profiles, listings, messages) for farmers, agronomists, service providers, dealers, and buyers, and a 0-100 field score vs. cropland within 2 km (ESA WorldCover). Processing version 3.

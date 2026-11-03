@@ -19,6 +19,8 @@ from shapely.geometry import shape
 
 from . import disease, qa
 from .accounts import Accounts, new_id, now
+from .news import News
+from .prices import Prices
 from .store import Store
 from .weather import WeatherStore, hourly, summary
 
@@ -74,6 +76,14 @@ class PostIn(BaseModel):
 
 class CommentIn(BaseModel):
     body: str = Field(min_length=1, max_length=2000)
+
+
+class PriceIn(BaseModel):
+    commodity: str
+    price: float = Field(gt=0, lt=100)
+    kind: str = "cash"
+    source: str = Field("Manual entry", min_length=2, max_length=80)
+    contract: str | None = Field(None, max_length=20)
 
 
 class Watcher:
@@ -182,10 +192,21 @@ def make_router(
     watcher: Watcher,
     require_user: Callable[..., dict[str, Any]],
     field_access: Callable[[str, dict[str, Any]], dict[str, Any]],
+    news: News,
+    prices: Prices,
 ) -> APIRouter:
     with accounts.db() as c:
         c.executescript(SCHEMA)
+        cols = {row[1] for row in c.execute("PRAGMA table_info(crop_reports)")}
+        if "place" not in cols:
+            c.execute("ALTER TABLE crop_reports ADD COLUMN place TEXT")
     r = APIRouter()
+    names = {k: v.name for k, v in disease.DISEASES.items()} | EXTRA_DISEASES
+
+    def require_admin(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        if not user.get("is_admin"):
+            raise HTTPException(403, "Admins only.")
+        return user
 
     def my_points(user: dict[str, Any]) -> list[tuple[float, float]]:
         pts = []
@@ -237,24 +258,25 @@ def make_router(
         rid = new_id("r")
         d = disease.DISEASES.get(body.disease)
         name = d.name if d else EXTRA_DISEASES[body.disease]
+        county = news.counties.lookup(lat, lon)
+        place = county["label"] if county else None
         with accounts.db() as c:
-            c.execute("INSERT INTO crop_reports (id, user_id, disease, crop, severity, lat, lon, observed, notes, created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            c.execute("INSERT INTO crop_reports (id, user_id, disease, crop, severity, lat, lon, observed, notes, created, place) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                       (rid, user["id"], body.disease, crop or (d.crop if d else None), body.severity, rounded(lat), rounded(lon),
-                       observed.isoformat(), (body.notes or "").strip() or None, now()))
+                       observed.isoformat(), (body.notes or "").strip() or None, now(), place))
             if body.share:
-                text = f"Spotted {name.lower()} ({body.severity})" + (f": {body.notes.strip()}" if body.notes and body.notes.strip() else "")
+                text = (body.notes or "").strip() or f"{name} ({body.severity})"
                 c.execute("INSERT INTO posts (id, user_id, kind, body, report_id, lat, lon, created) VALUES (?,?,?,?,?,?,?,?)",
                           (new_id("p"), user["id"], "report", text, rid, rounded(lat), rounded(lon), now()))
         with watcher._lock:
             watcher._cache.clear()  # nearby pressures change
         store.log("crop_report.created", by=user["id"], report_id=rid, disease=body.disease)
-        return {"id": rid, "lat": rounded(lat), "lon": rounded(lon)}
+        return {"id": rid, "lat": rounded(lat), "lon": rounded(lon), "place": place}
 
     @r.get("/api/crop-reports")
     def list_reports(lat: float, lon: float, radius_km: float = Query(250, le=1000), days: int = Query(21, le=90),
                      user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
         rows = watcher.reports_near(lat, lon, radius_km, days)
-        names = {k: v.name for k, v in disease.DISEASES.items()} | EXTRA_DISEASES
         return [{**{k: x[k] for k in ("id", "disease", "severity", "lat", "lon", "observed", "notes", "author")},
                  "name": names.get(x["disease"], x["disease"]), "km": round(km(lat, lon, x["lat"], x["lon"]))} for x in rows]
 
@@ -305,45 +327,104 @@ def make_router(
             c.execute("INSERT INTO comments (post_id, user_id, body, created) VALUES (?,?,?,?)", (post_id, user["id"], body.body.strip(), now()))
         return comments(post_id, user)
 
+    # ---- prices & sources --------------------------------------------------------
+    @r.get("/api/prices")
+    def price_board(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        return prices.board()
+
+    @r.post("/api/prices", status_code=201)
+    def set_price(body: PriceIn, user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+        try:
+            prices.add(body.commodity, body.price, kind=body.kind, source=body.source.strip(), contract=body.contract)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        store.log("price.set", by=user["id"], commodity=body.commodity, price=body.price, source=body.source)
+        return prices.board()
+
+    @r.get("/api/news/sources")
+    def news_sources(user: dict[str, Any] = Depends(require_admin)) -> list[dict[str, Any]]:
+        return news.health()
+
+    @r.post("/api/news/refresh")
+    def news_refresh(user: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+        return news.refresh()
+
+    # ---- the News feed --------------------------------------------------------------
     @r.get("/api/feed")
-    def feed(scope: str = Query("all", pattern="^(all|near|mine)$"), kind: str | None = Query(None, pattern="^(post|report|listing|field)$"),
+    def feed(section: str = Query("all", pattern="^(all|local|national|community|market|fields)$"),
              user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        """Sections: local (near my fields: reports, storms, roundup), national (news),
+        community (posts and reports everywhere), market (listings), fields (my field alerts)."""
         pts = my_points(user)
         items: list[dict[str, Any]] = []
-        since = (datetime.now(timezone.utc) - timedelta(days=60)).replace(microsecond=0).isoformat()
-        if kind in (None, "post", "report"):
+        since = (datetime.now(timezone.utc) - timedelta(days=30)).replace(microsecond=0).isoformat()
+        near = lambda lat, lon: (dist_km(pts, lat, lon) or 1e9) <= NEAR_KM  # noqa: E731
+
+        if section in ("all", "local", "community"):
             with accounts.db() as c:
                 rows = c.execute(
                     "SELECT po.*, pr.display_name AS author, pr.business_name AS business, "
                     " (SELECT COUNT(*) FROM helpful h WHERE h.post_id=po.id) AS helpful, "
                     " (SELECT COUNT(*) FROM helpful h WHERE h.post_id=po.id AND h.user_id=?) AS mine, "
                     " (SELECT COUNT(*) FROM comments cm WHERE cm.post_id=po.id) AS comments, "
-                    " cr.disease, cr.severity, cr.observed "
+                    " cr.disease, cr.severity, cr.observed, cr.place "
                     "FROM posts po LEFT JOIN profiles pr ON pr.user_id=po.user_id LEFT JOIN crop_reports cr ON cr.id=po.report_id "
                     "WHERE po.created>=? ORDER BY po.created DESC LIMIT 200", (user["id"], since)).fetchall()
             for x in rows:
                 x = dict(x)
-                if kind and x["kind"] != kind:
-                    continue
                 d = dist_km(pts, x["lat"], x["lon"])
-                if scope == "near" and (d is None or d > NEAR_KM):
+                if section == "local" and not near(x["lat"], x["lon"]):
                     continue
-                if scope == "mine" and x["user_id"] != user["id"]:
-                    continue
+                title = None
+                if x["kind"] == "report":
+                    what = names.get(x["disease"], "Crop problem")
+                    verb = "reported" if x["disease"] in ("hail", "insect", "weed") else "spotted"
+                    title = f"{what} {verb} in {x['place']}" if x.get("place") else f"{what} {verb}"
                 items.append({"type": x["kind"], "id": x["id"], "time": x["created"], "author": x["business"] or x["author"],
-                              "author_id": x["user_id"], "body": x["body"], "miles": round(d * 0.621) if d is not None else None,
+                              "author_id": x["user_id"], "title": title, "body": x["body"], "miles": round(d * 0.621) if d is not None else None,
                               "helpful": x["helpful"], "mine": bool(x["mine"]), "comments": x["comments"],
-                              "disease": x["disease"], "severity": x["severity"], "observed": x["observed"]})
-        # Listings only have a free-text location, so they can't be distance-filtered for "near".
-        if kind in (None, "listing") and scope == "all":
+                              "disease": x["disease"], "severity": x["severity"], "observed": x["observed"], "place": x.get("place")})
+
+        if section in ("all", "local", "national"):
+            for n in news.items(since):
+                if n["scope"] == "local":
+                    if section == "national" or n["lat"] is None or not near(n["lat"], n["lon"]):
+                        continue
+                    d = dist_km(pts, n["lat"], n["lon"])
+                    items.append({"type": "storm", "id": n["id"], "time": n["published"], "title": n["title"], "body": n["summary"],
+                                  "source": n["source_name"], "miles": round(d * 0.621) if d is not None else None, "place": n["place"]})
+                elif section != "local":
+                    items.append({"type": "news", "id": n["id"], "time": n["published"], "title": n["title"], "body": n["summary"],
+                                  "url": n["url"], "source": n["source_name"]})
+
+        if section in ("all", "local") and pts:
+            # Weekly roundup of reports near my fields, grouped by problem and county.
+            week = (datetime.now(timezone.utc).date() - timedelta(days=7)).isoformat()
+            with accounts.db() as c:
+                recent = [dict(x) for x in c.execute("SELECT disease, place, lat, lon FROM crop_reports WHERE observed>=?", (week,))]
+            groups: dict[str, set[str]] = {}
+            counts: dict[str, int] = {}
+            for x in recent:
+                if near(x["lat"], x["lon"]):
+                    nm = names.get(x["disease"], x["disease"])
+                    counts[nm] = counts.get(nm, 0) + 1
+                    if x["place"]:
+                        groups.setdefault(nm, set()).add(x["place"].split(",")[0])
+            if counts:
+                pts_txt = [f"{nm}: {n} report{'s' if n > 1 else ''}" + (f" ({', '.join(sorted(groups.get(nm, []))[:3])})" if groups.get(nm) else "")
+                           for nm, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+                items.append({"type": "roundup", "id": f"roundup:{week}", "time": now(), "title": "This week near your fields", "points": pts_txt})
+
+        if section in ("all", "market"):
             with accounts.db() as c:
                 for x in c.execute("SELECT l.*, p.display_name AS author, p.business_name AS business FROM listings l "
                                    "JOIN profiles p ON p.user_id=l.user_id WHERE l.status='active' AND l.created>=? "
                                    "ORDER BY l.created DESC LIMIT 50", (since,)):
                     items.append({"type": "listing", "id": x["id"], "time": x["created"], "author": x["business"] or x["author"],
                                   "author_id": x["user_id"], "title": x["title"], "body": x["description"], "price": x["price"],
-                                  "location": x["location"], "kind_label": x["kind"]})
-        if kind in (None, "field"):
+                                  "location": x["location"]})
+
+        if section in ("all", "fields"):
             for fid in accounts.fields_for(user["id"]):
                 try:
                     f = store.get_field(fid)
@@ -365,7 +446,8 @@ def make_router(
                                   "field_id": fid, "field": f["name"], "severity": "high" if hist[0]["level"] == "High" else "medium",
                                   "title": f"{hist[0]['top']} pressure is {hist[0]['level'].lower()} ({hist[0]['score']})",
                                   "points": ["Open the field's watch list for why and what to look for"]})
-        items.sort(key=lambda i: i["time"], reverse=True)
-        return items[:100]
+        roundup = [i for i in items if i["type"] == "roundup"]
+        rest = sorted([i for i in items if i["type"] != "roundup"], key=lambda i: i["time"], reverse=True)
+        return (roundup + rest)[:100]
 
     return r

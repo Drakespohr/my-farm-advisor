@@ -1076,7 +1076,7 @@
     const arg = rest.join("/");
     if (view === "login") { showView("auth"); FM.views.auth(); return; }
     if (view === "market") { showView("market"); FM.views.market(arg); return; }
-    if (view === "feed") { showView("feed"); FM.views.feed(arg); return; }
+    if (view === "news" || view === "feed") { showView("feed"); FM.views.news(arg); return; }
     if (view === "messages") { showView("messages"); FM.views.messages(arg); return; }
     if (view === "u" || view === "me") { showView("profile"); FM.views.profile(view === "me" ? state.me.user.id : arg, view === "me"); return; }
     showView("fields");

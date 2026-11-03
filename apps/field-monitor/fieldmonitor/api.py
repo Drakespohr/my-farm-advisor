@@ -30,6 +30,8 @@ from pydantic import BaseModel, Field
 from . import APP_NAME, APP_TAGLINE, PROCESSING_VERSION, __version__, analysis, diagnose, qa, score as scoring
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
+from .news import News
+from .prices import Prices
 from .social import make_router
 from .weather import WeatherStore
 from .boundaries import parse_file, parse_geojson
@@ -93,6 +95,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         syncer.start_scheduler()
         if refresh_hours:
             watcher.start()  # keep disease pressure current even when nobody has the app open
+            news.start()
+            prices.start()
         yield
         syncer.stop()
 
@@ -102,6 +106,9 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     app.state.accounts = accounts
     watcher = Watcher(store, accounts, WeatherStore(store.root / "weather.db"))
     app.state.watcher = watcher
+    news = News(accounts, store.root)
+    prices = Prices(accounts)
+    app.state.news, app.state.prices = news, prices
 
     @app.middleware("http")
     async def csrf_guard(request: Request, call_next: Any) -> Any:
@@ -544,7 +551,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return field_score_for(field_id, as_of)
 
     app.include_router(make_router(accounts, store, require_user, lambda fid: field_score_for(fid)))
-    app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user)))
+    app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices))
 
     @app.exception_handler(FileExistsError)
     def conflict(_: Any, exc: FileExistsError) -> JSONResponse:

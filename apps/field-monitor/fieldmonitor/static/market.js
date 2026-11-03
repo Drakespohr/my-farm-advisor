@@ -251,11 +251,6 @@
     threadTimer = setInterval(() => { if (location.hash === `#/messages/${convId}` && !document.hidden && !thread.querySelector("textarea").value) draw(); }, 10000);
   };
 
-  // ---------- feed --------------------------------------------------------------
-  const FILTERS = [["All", {}], ["Near me", { scope: "near" }], ["Reports", { kind: "report" }], ["Posts", { kind: "post" }],
-    ["Marketplace", { kind: "listing" }], ["My fields", { kind: "field" }]];
-  let feedFilter = 0;
-
   function feedItem(it) {
     const card = el("div", { class: `card fitem t-${it.type}` });
     const ago = when(it.time);
@@ -308,26 +303,102 @@
     return card;
   }
 
-  FM.views.feed = async () => {
+  // ---------- news ----------------------------------------------------------------
+  const SECTIONS = [["All", "all"], ["Local", "local"], ["National", "national"], ["Community", "community"], ["Marketplace", "market"], ["My fields", "fields"]];
+  let section = "all";
+  const money = (v) => `$${v.toFixed(2)}`;
+  const cents = (v) => (Math.abs(v) < 1 ? `${Math.round(Math.abs(v) * 100)}¢` : `$${Math.abs(v).toFixed(2)}`);
+
+  function sparkline(values) {
+    if (!values || values.length < 2) return null;
+    const w = 90, h = 26, lo = Math.min(...values), hi = Math.max(...values), span = hi - lo || 1;
+    const pts = values.map((v, i) => `${(i / (values.length - 1)) * w},${h - 2 - ((v - lo) / span) * (h - 4)}`).join(" ");
+    const s = FM.svg("svg", { viewBox: `0 0 ${w} ${h}`, class: "spark", "aria-hidden": "true" });
+    s.append(FM.svg("polyline", { points: pts }));
+    return s;
+  }
+
+  function priceCard(c) {
+    if (c.price == null) {
+      return el("div", { class: "pcard empty" }, el("div", { class: "pname", text: c.name }),
+        el("div", { class: "pprice muted", text: "—" }), el("div", { class: "pmeta", text: "No price yet" }));
+    }
+    const dir = c.change > 0 ? "up" : c.change < 0 ? "down" : "flat";
+    const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "■";
+    const label = c.kind === "futures" ? `Futures${c.contract ? " " + c.contract : ""}` : "Cash bid";
+    return el("div", { class: `pcard ${dir}`, title: `${c.name}: ${money(c.price)}/${c.unit} · ${label} · ${c.source} · ${c.as_of}` },
+      el("div", { class: "row space" }, el("span", { class: "pname", text: c.name }), sparkline(c.history)),
+      el("div", { class: "pprice" }, money(c.price), el("span", { class: "punit", text: `/${c.unit}` })),
+      c.change != null ? el("div", { class: `pchg ${dir}`, text: `${arrow} ${cents(c.change)}${c.pct != null ? ` (${Math.abs(c.pct).toFixed(1)}%)` : ""}` }) : null,
+      el("div", { class: "pmeta", text: `${label} · ${c.source} · ${when(c.as_of)}` }));
+  }
+
+  async function priceBoard(box) {
+    const b = await api("/api/prices");
+    box.replaceChildren(el("div", { class: "pboard" }, ...b.commodities.map(priceCard)));
+    const me = FM.state.me;
+    if (me && me.user.is_admin) {
+      const com = el("select", {}, ...b.commodities.map((c) => el("option", { value: c.key, text: c.name })));
+      const price = el("input", { type: "number", step: "0.01", min: "0.01", max: "99", required: "", placeholder: "4.32" });
+      const kind = el("select", {}, el("option", { value: "cash", text: "Cash bid" }), el("option", { value: "futures", text: "Futures" }));
+      const src = el("input", { type: "text", required: "", maxlength: "80", placeholder: "e.g. Chariton Co-op" });
+      const msg = el("span", { class: "small", role: "status" });
+      const form = el("form", { class: "row gap wrap end" }, field("Crop", com), field("Price ($/bu)", price), field("Type", kind), field("Source", src),
+        el("button", { class: "btn", type: "submit", text: "Save" }), msg);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try {
+          await api("/api/prices", { method: "POST", body: JSON.stringify({ commodity: com.value, price: Number(price.value), kind: kind.value, source: src.value }) });
+          priceBoard(box);
+        } catch (ex) { msg.textContent = ex.message; }
+      });
+      box.append(el("details", { class: "more small" }, el("summary", { text: b.live_feed ? "Add a local cash bid" : "Update prices (no live feed connected)" }), form));
+    }
+  }
+
+  function newsItem(it) {
+    const ago = when(it.time);
+    if (it.type === "roundup") {
+      return el("div", { class: "card fitem t-roundup" }, el("div", { class: "head" }, chip("Local roundup"), el("b", { text: it.title })),
+        el("ul", { class: "bullets small" }, it.points.map((p) => el("li", { text: p }))));
+    }
+    if (it.type === "news") {
+      return el("a", { class: "card fitem t-news", href: it.url, target: "_blank", rel: "noopener nofollow" },
+        el("div", { class: "head" }, chip("National"), el("span", { class: "muted", text: `${it.source} · ${ago}` })),
+        el("b", { class: "ftitle", text: it.title }), it.body ? el("p", { class: "ldesc", text: it.body }) : null,
+        el("span", { class: "small muted", text: "Read at source ↗" }));
+    }
+    if (it.type === "storm") {
+      return el("div", { class: "card fitem t-storm" },
+        el("div", { class: "head" }, chip("Storm report", "closed"), el("span", { class: "muted", text: `${ago}${it.miles != null ? ` · ${it.miles} mi from your fields` : ""}` })),
+        el("b", { class: "ftitle", text: it.title }), it.body ? el("p", { class: "small muted", text: it.body }) : null,
+        el("span", { class: "small muted", text: `Source: ${it.source} (preliminary)` }));
+    }
+    const card = feedItem(it);
+    if (it.type === "report" && it.title) card.insertBefore(el("b", { class: "ftitle", text: it.title }), card.children[1]);
+    return card;
+  }
+
+  FM.views.news = async () => {
     const p = page("view-feed");
+    const prices = el("div", { class: "prices" }, el("p", { class: "muted small", text: "Loading prices…" }));
     const fields = (FM.state.fields && FM.state.fields.length ? FM.state.fields : await api("/api/fields")).filter((f) => f.my_role === "owner");
-    const body = el("textarea", { rows: "3", maxlength: "3000", placeholder: "Share an update: crop progress, what you're seeing, a question for the area…" });
-    const where = el("select", {}, el("option", { value: "", text: "No location" }),
-      ...fields.map((f) => el("option", { value: f.id, text: `Near ${f.name}` })));
+    const body = el("textarea", { rows: "2", maxlength: "3000", placeholder: "Share an update: crop progress, what you're seeing, a question for the area…" });
+    const where = el("select", {}, el("option", { value: "", text: "No location" }), ...fields.map((f) => el("option", { value: f.id, text: `Near ${f.name}` })));
     const msg = el("p", { class: "small err", role: "alert" });
     const composer = el("form", { class: "card composer" }, body,
-      el("div", { class: "row gap wrap" }, el("label", { class: "small" }, "Tag my area (≈1 km, never the exact field)", where),
-        el("span", { class: "grow" }), el("button", { class: "btn primary", type: "submit", text: "Post" })), msg);
+      el("div", { class: "row gap wrap end" }, el("label", { class: "small" }, "Tag my area (≈1 km)", where), el("span", { class: "grow" }),
+        el("button", { class: "btn primary", type: "submit", text: "Post" })), msg);
     const list = el("div", { class: "stack" });
-    const chips = el("div", { class: "chips" });
+    const chips = el("div", { class: "chips", role: "tablist" });
     const load = async () => {
-      chips.replaceChildren(...FILTERS.map(([label], i) => el("button", { type: "button", class: i === feedFilter ? "on" : "", text: label,
-        onclick: () => { feedFilter = i; load(); } })));
-      const qs = new URLSearchParams(FILTERS[feedFilter][1]);
+      chips.replaceChildren(...SECTIONS.map(([label, key]) => el("button", { type: "button", role: "tab", class: key === section ? "on" : "", text: label,
+        "aria-selected": String(key === section), onclick: () => { section = key; load(); } })));
       list.replaceChildren(el("p", { class: "muted small", text: "Loading…" }));
-      const items = await api(`/api/feed?${qs}`);
-      list.replaceChildren(...(items.length ? items.map(feedItem)
-        : [el("p", { class: "muted", text: feedFilter === 1 ? "Nothing within 100 miles of your fields yet." : "Nothing here yet. Post the first update!" })]));
+      const items = await api(`/api/feed?section=${section}`);
+      const empty = { local: "Nothing reported within 100 miles of your fields this month.", national: "No headlines yet. Sources refresh every 2 hours.",
+        fields: "No alerts on your fields.", market: "No new listings." }[section] || "Nothing here yet. Post the first update!";
+      list.replaceChildren(...(items.length ? items.map(newsItem) : [el("p", { class: "muted", text: empty })]));
     };
     composer.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -335,12 +406,12 @@
       try {
         await api("/api/posts", { method: "POST", body: JSON.stringify({ body: body.value, field_id: where.value || null }) });
         body.value = "";
+        section = "all";
         load();
       } catch (ex) { msg.textContent = ex.message; }
     });
-    p.append(el("div", { class: "page-head" }, el("h1", { text: "Feed" })),
-      el("p", { class: "muted", text: "Field reports, updates from the area, new listings, and alerts on your fields." }),
-      composer, chips, list);
+    p.append(el("div", { class: "page-head" }, el("h1", { text: "News" })), prices, chips, composer, list);
+    priceBoard(prices).catch((ex) => prices.replaceChildren(el("p", { class: "small muted", text: `Prices unavailable: ${ex.message}` })));
     load();
   };
 

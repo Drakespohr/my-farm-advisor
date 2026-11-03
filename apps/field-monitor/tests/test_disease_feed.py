@@ -88,6 +88,8 @@ def test_weather_parsers():
 @pytest.fixture()
 def app(store, monkeypatch):
     monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda *a, **k: ([], "test"))
+    monkeypatch.setattr("fieldmonitor.news.Counties.lookup", lambda self, lat, lon: (
+        {"label": "Lucas County, IA"} if abs(lat - 42) < 1 else {"label": "Phelps County, MO"}))
     monkeypatch.setattr("fieldmonitor.feed.hourly", lambda lat, lon, ws, as_of=None, days=30: (
         hours(30, 28, 95, end=datetime.now(timezone.utc).date()), {"provider": "test", "station": "Test Airport"}))
     return create_app(store, refresh_hours=0)
@@ -118,9 +120,12 @@ def test_reports_posts_feed_and_watch(app, store):
     a.post("/api/posts", json={"body": "Anyone seeing rust south of Chariton?", "field_id": fa})
     feed = a.get("/api/feed").json()
     types = {i["type"] for i in feed}
-    assert {"report", "post", "field"} <= types
-    near = a.get("/api/feed?scope=near").json()
+    assert {"report", "post", "field", "roundup"} <= types
+    rep_item = next(i for i in feed if i["type"] == "report" and "rust" in (i["title"] or "").lower())
+    assert rep_item["title"] == "Southern rust spotted in Lucas County, IA"
+    near = a.get("/api/feed?section=local").json()
     assert all(i.get("miles") is not None and i["miles"] < 100 for i in near if i["type"] in ("post", "report"))
+    assert near[0]["type"] == "roundup" and any("Southern rust: 1 report (Lucas County)" in p for p in near[0]["points"])
     assert not any("beetles" in i.get("body", "") for i in near)  # the far-away report isn't "near"
     pid = next(i["id"] for i in feed if i["type"] == "report")
     assert a.post(f"/api/posts/{pid}/helpful").json() == {"helpful": 1, "mine": True}
