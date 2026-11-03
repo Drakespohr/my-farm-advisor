@@ -414,3 +414,31 @@ label > input[type=text], label > input[type=email], label > input[type=password
   .score-empty { text-align: left; }
 }
 .filters > .grow { flex: 1 1 260px; min-width: 0; }
+
+/* ---------- watch list, pressure, feed ---------- */
+.hero-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: none; }
+.pressure-badge { font-size: 12.5px; font-weight: 650; padding: 3px 9px; border-radius: 12px; border: 1px solid currentColor; white-space: nowrap; }
+.pressure-badge.p-high { color: var(--poor); } .pressure-badge.p-moderate { color: var(--fair); } .pressure-badge.p-low { color: var(--good); }
+.watch { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.watch h4 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+.witem { display: grid; grid-template-columns: 22px 1fr; gap: 2px 6px; font-size: 13px; }
+.witem .ic { grid-row: span 2; font-size: 15px; line-height: 1.2; }
+.witem .t { font-weight: 600; }
+.witem .t.l-high { color: var(--poor); } .witem .t.l-moderate, .witem .t.l-medium { color: var(--fair); }
+.witem ul { margin: 0; padding-left: 16px; color: var(--text-secondary); }
+.report-form { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.composer { display: flex; flex-direction: column; gap: 8px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chips button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 16px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }
+.chips button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.fitem { display: flex; flex-direction: column; gap: 6px; }
+.fitem .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.fitem .head a { color: var(--text-primary); font-weight: 600; text-decoration: none; }
+.fitem .actions { display: flex; gap: 12px; font-size: 13px; }
+.fitem .actions button { font: inherit; background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 2px 0; }
+.fitem .actions button.on { color: var(--accent); font-weight: 650; }
+.fitem .cmts { border-left: 2px solid var(--border); padding-left: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.fitem.t-field { border-left: 4px solid var(--fair); }
+.fitem.t-report { border-left: 4px solid var(--poor); }
+.fitem.t-listing { border-left: 4px solid #2a78d6; }
+@media (max-width: 820px) { .hero-side { align-items: flex-start; flex-direction: row; } }

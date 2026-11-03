@@ -46,6 +46,48 @@ checks on every field endpoint (unknown and forbidden fields both return 404). I
 run behind HTTPS (set `FIELD_MONITOR_COOKIE_SECURE=1` if TLS ends at a proxy) and back up
 `$FIELD_MONITOR_DATA/app.db` along with the field data.
 
+## Disease pressure, watch list, and feed
+
+**Things to watch** sits under the field score: the top disease risks, recent weather, and any
+satellite alerts, a few bullets each. A badge beside the score shows the overall disease level.
+
+**Disease pressure (0–100 per disease, Low / Moderate / High)** combines:
+
+| Signal | How |
+|---|---|
+| Weather | "Favorable days": days with enough wet hours (RH ≥ 90% or rain) inside the disease's temperature range. Forecast days count half. |
+| Nearby reports | Community scouting reports of the same disease, weighted by severity, distance, and age (3 weeks). Southern rust looks out ~155 mi, since spores blow in from the south. |
+| Crop stage | From the field's latest canopy NDVI: discounted before canopy closure and after harvest. |
+
+Corn: southern rust, tar spot, gray leaf spot, northern corn leaf blight. Soybean: white mold,
+frogeye leaf spot. The field's crop (set with **Edit details**) picks the list. These are
+simplified rules from extension guidance, **not** the validated tools (Tarspotter,
+Sporecaster): use them to decide where and when to scout. Pressure is recomputed every 6 h in
+the background, and on demand when you open a field. Picking an older image shows the pressure
+*as of that date* from archived weather.
+
+On the 2025 test field (Chariton, IA station), weather alone gave: mid-June low; July tar spot
+and northern corn leaf blight high after a humid stretch; August gray leaf spot rising to
+moderate-high; southern rust 60 (moderate) by August. Southern rust needs incoming spores, so
+nearby reports, which 2025 had plenty of, are what push it to High.
+
+**Weather sources** (`FIELD_MONITOR_WEATHER`):
+- `nws` (default, US): National Weather Service observations + hourly forecast, public domain.
+  Observations are stored as they arrive, so 30 days of history build up locally.
+- `open-meteo`: 30 days of history + 7-day forecast immediately; its free API is for
+  **non-commercial** use only.
+- Past dates use NOAA Global Hourly (ISD) from AWS Open Data (currently ends in 2025).
+Small airport stations often don't report rain; the app says "not reported" rather than 0.
+
+**Field reports:** anyone can report a disease, insect, weed, or hail from a field they can see,
+or from their location. Locations are rounded to ~1 km. Reports feed nearby fields' pressure
+immediately and (optionally) post to the feed.
+
+**Feed:** posts, field reports, new marketplace listings, and alerts on your own fields
+(confirmed declines, disease pressure rising to Moderate/High). Filters: All, Near me (within
+~100 mi of your fields), Reports, Posts, Marketplace, My fields. Posts can be tagged to a
+field's area (rounded), marked Helpful, commented on, and reported.
+
 ## Field score
 
 A 0–100 score in the field header (and on the field list) answers "how is this field doing
@@ -283,14 +325,15 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 77 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 84 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel
 comparison, pending/confirmed/recovered, field vs. regional scope, stale-version reprocessing,
 hotspot cause rules for water, strips, nitrogen, dry spots, persistent vs. new, edges, stand,
 accounts/login/CSRF, private fields and view-only sharing, listings, messages, unread counts,
-profile showcase, and the field score incl. season end). No network is needed.
+profile showcase, the field score incl. season end, disease pressure rules, weather parsers
+(NWS, Open-Meteo, NOAA ISD), report privacy rounding, and the feed). No network is needed.
 
 ## Limitations and next steps
 
