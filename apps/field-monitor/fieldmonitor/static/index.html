@@ -22,7 +22,7 @@
           <label class="check small"><input type="checkbox" id="show-archived"> archived</label>
         </div>
         <ul id="field-list" class="field-list" aria-live="polite"></ul>
-        <p id="no-fields" class="muted small" hidden>No fields yet. Tap <b>Map a new field</b> to outline one on the satellite map, or import a KML/GeoJSON file.</p>
+        <p id="no-fields" class="muted small" hidden>No fields yet. Tap <b>Map a new field</b> to start.</p>
       </section>
 
       <section class="card">
@@ -31,14 +31,12 @@
           <button id="new-field-btn" class="btn primary block">＋ Map a new field</button>
           <label class="btn ghost block file-btn">Import KML / KMZ / GeoJSON<input type="file" id="import-file" accept=".kml,.kmz,.geojson,.json,application/vnd.google-earth.kml+xml,application/vnd.google-earth.kmz,application/geo+json,application/json" hidden></label>
         </div>
-        <p class="small muted">Outline a field on the satellite map like a drone mapping mission, or import boundaries exported from DJI Pilot, Google Earth, or your farm software. Saved fields update automatically.</p>
+        <p class="small muted">Saved fields update on their own.</p>
         <p id="import-msg" class="small" role="status"></p>
       </section>
 
       <section class="small muted about">
-        Imagery: Copernicus Sentinel-2 L2A via Earth Search (Element 84). Clouds are masked per field
-        from the scene classification layer. Observations are immutable and versioned.
-        <span id="version"></span>
+        Sentinel-2 satellite · new image every 2–5 days<br><span id="version"></span>
       </section>
     </aside>
 
@@ -91,63 +89,44 @@
           </div>
         </div>
 
-        <div class="process card">
-          <div class="row space wrap">
-            <div>
-              <div id="sync-line" class="sync-line"></div>
-              <div id="sync-sub" class="small muted"></div>
-            </div>
-            <button id="sync-btn" class="btn">Check for new imagery</button>
-          </div>
-          <div id="job" class="job small" role="status" aria-live="polite" hidden>
-            <div class="bar"><div id="job-bar"></div></div>
-            <span id="job-text"></span>
-          </div>
-          <details class="range small">
-            <summary>Fetch a specific date range (older seasons)</summary>
-            <div class="row gap wrap end">
-              <label>From <input type="date" id="p-start"></label>
-              <label>To <input type="date" id="p-end"></label>
-              <label title="Whole-tile cloud cover filter. Your field is cloud-masked separately, so a loose limit is fine.">Max scene cloud %
-                <input type="number" id="p-cloud" value="60" min="0" max="100" step="5"></label>
-              <button id="process-btn" class="btn">Fetch range</button>
-            </div>
-          </details>
+        <div class="status-row">
+          <span id="sync-line" class="sync-line"></span>
+          <button id="sync-btn" class="btn ghost small-btn" title="Check for a new satellite image now">↻ Check now</button>
+        </div>
+        <div id="job" class="job small" role="status" aria-live="polite" hidden>
+          <div class="bar"><div id="job-bar"></div></div>
+          <span id="job-text"></span>
         </div>
 
         <div class="controls row gap wrap">
-          <label>Layer
+          <label class="grow">Show
             <select id="index-select"></select>
           </label>
           <label>Date
             <select id="obs-select"></select>
           </label>
-          <label class="check"><input type="checkbox" id="show-cloudy"> include cloudy dates</label>
-          <label>Opacity <input type="range" id="opacity" min="0.2" max="1" step="0.05" value="0.9"></label>
         </div>
 
-        <div id="index-info" class="index-info card small"></div>
+        <ul id="index-info" class="bullets small"></ul>
 
         <div id="alerts"></div>
 
         <div class="card">
-          <div class="row space">
-            <h3 id="chart-title">Season trend</h3>
-            <span class="small muted">Line = field median of good dates · band = 10th–90th percentile · hollow gray = suspect date (haze or one-pass artifact), excluded</span>
-          </div>
+          <h3 id="chart-title">Season trend</h3>
           <div id="chart" class="chart" role="img"></div>
-          <p id="chart-empty" class="small muted" hidden>No clear observations yet. Fetch imagery for a date range.</p>
+          <p class="small muted chart-key">Line: typical value · shading: range across the field · ○ skipped (hazy or bad image)</p>
+          <p id="chart-empty" class="small muted" hidden>No clear images yet.</p>
         </div>
 
         <nav class="tabs" role="tablist">
           <button role="tab" class="tab active" data-tab="scout" aria-selected="true">Scout</button>
           <button role="tab" class="tab" data-tab="zones" aria-selected="false">Zones</button>
-          <button role="tab" class="tab" data-tab="change" aria-selected="false">Change</button>
+          <button role="tab" class="tab" data-tab="change" aria-selected="false">Compare dates</button>
           <button role="tab" class="tab" data-tab="data" aria-selected="false">Data</button>
         </nav>
 
         <div class="tabpanel" id="tab-scout">
-          <p class="small muted">Contiguous low patches on the selected date, ranked by size × severity. Each has a GPS point to walk to.</p>
+          <p class="small muted">Low spots to check, worst first. Tap one to see why it was flagged.</p>
           <div id="hotspots"></div>
         </div>
 
@@ -156,8 +135,8 @@
             <label>Zones <select id="zone-n"><option>2</option><option selected>3</option><option>4</option><option>5</option></select></label>
             <label>Basis
               <select id="zone-mode">
-                <option value="multi">All canopy dates (recommended)</option>
-                <option value="single">Selected date only</option>
+                <option value="multi">Whole season (best)</option>
+                <option value="single">This date only</option>
               </select>
             </label>
             <button id="zones-btn" class="btn">Build zones</button>
@@ -170,7 +149,7 @@
           <div class="row gap wrap end">
             <label>Before <select id="chg-before"></select></label>
             <label>After <select id="chg-after"></select></label>
-            <label>Flag change ≥ <input type="number" id="chg-thr" value="0.1" step="0.01" min="0.01"></label>
+            <label title="Smallest change worth flagging">Flag change ≥ <input type="number" id="chg-thr" value="0.1" step="0.01" min="0.01"></label>
             <button id="change-btn" class="btn">Compare</button>
           </div>
           <div id="change-out"></div>
@@ -178,9 +157,25 @@
 
         <div class="tabpanel" id="tab-data" hidden>
           <div class="row gap wrap">
-            <a id="csv-link" class="btn ghost" download>Download time series CSV</a>
+            <a id="csv-link" class="btn ghost" download>Download spreadsheet (CSV)</a>
           </div>
           <div class="table-wrap"><table id="obs-table" class="table small"></table></div>
+          <details class="more small">
+            <summary>More options</summary>
+            <div class="stack">
+              <label class="check"><input type="checkbox" id="show-cloudy"> Show cloudy dates in the list</label>
+              <label>Map color strength <input type="range" id="opacity" min="0.2" max="1" step="0.05" value="0.9"></label>
+              <div>
+                <b>Load an older season</b>
+                <div class="row gap wrap end">
+                  <label>From <input type="date" id="p-start"></label>
+                  <label>To <input type="date" id="p-end"></label>
+                  <label title="Skip images that are mostly cloud across the whole satellite tile">Max cloud % <input type="number" id="p-cloud" value="60" min="0" max="100" step="5"></label>
+                  <button id="process-btn" class="btn">Load</button>
+                </div>
+              </div>
+            </div>
+          </details>
         </div>
       </section>
     </main>

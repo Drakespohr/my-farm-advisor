@@ -143,6 +143,13 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 
 ### Analyses
 
+- **Hotspot explanations:** tap a numbered spot for a pop-up that shows the spot's own NDVI,
+  NDRE, and crop water (NDMI) against the **field average** ("NDVI here is 0.26 below the field
+  average"), plus what's visible (along the edge, a straight strip, low all season, new since
+  a date, open water) and up to three ranked possible causes, each with what to check on the
+  ground. Rules live in `fieldmonitor/diagnose.py`; they're hedged on purpose (the satellite
+  shows where, not why). Surface water is only called when NDWI > 0: NDWI also rises wherever
+  the crop thins, which on the test field had falsely flagged every weak spot as "water".
 - **Scout (hotspots):** contiguous patches more than max(1.5×std, 0.05) below the field median,
   at least 0.2 ha. Ranked by area × deficit, each with a GPS point guaranteed to lie inside the
   patch and a Google Maps directions link.
@@ -228,11 +235,12 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 54 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 63 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel
-comparison, pending/confirmed/recovered, field vs. regional scope, stale-version reprocessing). No network is needed.
+comparison, pending/confirmed/recovered, field vs. regional scope, stale-version reprocessing,
+hotspot cause rules for water, strips, nitrogen, dry spots, persistent vs. new, edges, stand). No network is needed.
 
 ## Limitations and next steps
 

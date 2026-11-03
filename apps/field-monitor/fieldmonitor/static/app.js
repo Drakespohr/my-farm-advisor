@@ -104,6 +104,9 @@
     }
     renderLegend(legend);
   }
+  // The legend sits outside Leaflet's panes, so hide it while a popup is open.
+  map.on("popupopen", () => { $("map-legend").style.visibility = "hidden"; });
+  map.on("popupclose", () => { $("map-legend").style.visibility = ""; });
   $("opacity").addEventListener("input", (e) => overlay && overlay.setOpacity(Number(e.target.value)));
 
   function renderLegend(legend) {
@@ -464,32 +467,18 @@
     const st = f.sync || {};
     const job = st.job;
     const running = jobRunning(f);
-    if (f.replaced_by) {
-      $("sync-line").textContent = `Replaced by a newer boundary (${f.replaced_by}). History kept here.`;
-      $("sync-sub").textContent = "";
-    } else if (running) {
-      $("sync-line").textContent = job.reason === "new-field" ? "Pulling the last 12 months of satellite imagery…" : "Checking for new satellite passes…";
-      $("sync-sub").textContent = `${job.start} → ${job.end}`;
-    } else {
-      $("sync-line").textContent = st.auto_refresh_hours
-        ? `Auto-updates every ${st.auto_refresh_hours} h · last checked ${relTime(st.last_synced)}`
-        : `Last checked ${relTime(st.last_synced)} (automatic updates are off)`;
-      const r = st.last_result;
-      $("sync-sub").textContent = r
-        ? `Last check: ${r.new} new pass${r.new === 1 ? "" : "es"} (${r.clear} clear over this field in the window). Sentinel-2 passes every 2–5 days; cloudy passes are skipped.`
-        : "Sentinel-2 passes every 2–5 days; cloudy passes are skipped automatically.";
-      if (st.last_error) $("sync-sub").textContent += ` Some scenes failed: ${st.last_error}`;
-    }
+    let line;
+    if (f.replaced_by) line = "Old boundary (replaced). History kept.";
+    else if (running) line = job.reason === "new-field" ? "Getting the last 12 months of images…" : "Checking for new images…";
+    else line = `Updated ${relTime(st.last_synced)}` + (st.auto_refresh_hours ? ` · checks every ${st.auto_refresh_hours} h` : "");
+    $("sync-line").textContent = line;
+    $("sync-line").title = st.last_error ? `Some images failed: ${st.last_error}` : "";
     $("sync-btn").disabled = running || Boolean(f.replaced_by);
     $("process-btn").disabled = running;
-    $("job").hidden = !job;
-    if (job) {
+    $("job").hidden = !(job && running);
+    if (job && running) {
       $("job-bar").style.width = job.total ? `${(100 * job.done) / job.total}%` : "0";
-      $("job-text").textContent = running
-        ? (job.state === "searching" ? "Searching for satellite passes…" : `Processed ${job.done} of ${job.total} passes · ${job.clear} clear over this field`)
-        : job.state === "done"
-          ? `Done: ${job.total} passes checked, ${job.new} new, ${job.clear} clear.` + (job.errors.length ? ` ${job.errors.length} failed.` : "")
-          : `Failed: ${job.errors.join("; ")}`;
+      $("job-text").textContent = job.state === "searching" ? "Finding images…" : `${job.done} of ${job.total} images · ${job.clear} clear`;
     }
   }
 
@@ -551,12 +540,10 @@
   function renderObsSelect() {
     const sel = $("obs-select");
     sel.replaceChildren();
+    const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
     for (const o of visibleObs().slice().reverse()) {
-      const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
-      const q = qaShort(o);
-      const label = o.status === "clear"
-        ? `${o.qa_status === "suspect" ? "⚠ " : ""}${o.date} · ${state.indexByKey[key].name} ${fmt(o.stats[key].median)}${q ? ` (${q})` : ""}`
-        : `${o.date} · cloudy (${pct(o.field_clear_fraction)} clear)`;
+      const label = o.status !== "clear" ? `${o.date} · cloudy`
+        : `${o.date} · ${fmt(o.stats[key].median)}${o.qa_status === "suspect" ? " · ⚠ hazy/bad" : ""}`;
       sel.append(el("option", { value: o.id, text: label }));
     }
     if (state.obsId) sel.value = state.obsId;
@@ -567,8 +554,8 @@
   function renderIndexSelect() {
     const sel = $("index-select");
     sel.replaceChildren();
-    for (const i of state.indices) sel.append(el("option", { value: i.key, text: `${i.name} — ${i.measures.split(";")[0].replace(/\.$/, "")}` }));
-    sel.append(el("option", { value: "truecolor", text: "True color (what the satellite saw)" }));
+    for (const i of state.indices) sel.append(el("option", { value: i.key, text: `${i.plain} (${i.name})` }));
+    sel.append(el("option", { value: "truecolor", text: "Photo (true color)" }));
     sel.value = state.indexKey;
   }
   $("index-select").addEventListener("change", (e) => {
@@ -583,17 +570,13 @@
   function renderIndexInfo() {
     const box = $("index-info");
     box.replaceChildren();
+    const li = (k, v) => el("li", {}, el("b", { text: `${k}: ` }), v);
     if (state.indexKey === "truecolor") {
-      box.append(el("div", {}, el("b", { text: "True color. " }), "Natural-color composite (B04, B03, B02). Use it to sanity-check index maps: clouds, haze, tillage patterns, standing water."));
+      box.append(li("Shows", "What the satellite saw"), li("Use it to", "Spot clouds, haze, water, tillage"));
       return;
     }
     const i = state.indexByKey[state.indexKey];
-    box.append(
-      el("div", {}, el("b", { text: `${i.name}. ` }), i.measures, " ", el("span", { class: "formula", text: i.formula })),
-      el("div", {}, el("b", { text: "Best for: " }), i.best_for),
-      el("div", {}, el("b", { text: "Caveats: " }), i.caveats),
-      el("div", { class: "muted" }, "Rough guide: ", i.guide.map(([v, l]) => `≈${v} ${l}`).join(" · "), `. Higher = ${i.higher_is}. Confirm with scouting.`),
-    );
+    box.append(li("Shows", i.shows), li("Best for", i.use), li("Watch out", i.watch));
   }
 
   function currentObs() { return state.obs.find((o) => o.id === state.obsId) || null; }
@@ -604,26 +587,59 @@
     if (!o || !state.field) { setOverlay(null); $("hotspots").replaceChildren(); return; }
     const base = `/api/fields/${state.field.id}/observations/${o.id}`;
     const showTrue = state.indexKey === "truecolor" || o.status !== "clear";
+    const warn = o.qa_status === "suspect" ? "⚠ Hazy or bad image: trust less" : "";
     if (showTrue) {
       setOverlay(`${base}/truecolor.png`, o.bounds, {
-        title: `True color · ${o.date}`, items: o.status === "clear" ? [] : [{ color: "#ccc", label: `Cloudy: ${pct(o.field_clear_fraction)} of field clear` }],
+        title: `Photo · ${o.date}`, items: o.status === "clear" ? (warn ? [{ color: "#ccc", label: warn }] : []) : [{ color: "#ccc", label: "Too cloudy to measure" }],
       });
     } else {
       const i = state.indexByKey[state.indexKey];
       const st = o.stats[i.key];
       setOverlay(`${base}/${i.key}.png`, o.bounds, {
-        title: `${i.name} · ${o.date}`, cmap: i.colormap, lo: i.display_range[0], hi: i.display_range[1],
-        note: `Field median ${fmt(st.median)} · CV ${fmt(st.cv)} · ${pct(o.field_clear_fraction)} clear` +
-          (o.qa_status === "suspect" ? ` · ⚠ Suspect date, excluded from trend and alerts: ${qaText(o)}` : qaShort(o) ? ` · ${qaShort(o)}` : ""),
+        title: `${i.plain} · ${o.date}`, cmap: i.colormap, lo: `${i.display_range[0]} low`, hi: `high ${i.display_range[1]}`,
+        note: warn || `Field average ${fmt(st.mean)}`,
       });
     }
     loadHotspots(o);
   }
 
+  const signed = (v, d = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
+  const shortCause = (c) => c.split(":")[0];
+
+  // Popup explaining one hotspot. Built with DOM nodes (no HTML strings).
+  function spotPopup(h, keyName) {
+    const ex = h.explain || {};
+    const box = el("div", { class: "spot-pop" });
+    box.append(el("h4", { text: `Spot ${h.rank} · ${fmt(h.area_ac, 1)} ac` }));
+    if (ex.summary) box.append(el("p", { class: "sum", text: ex.summary }));
+    // Surface water only matters when there is some (NDWI > 0); otherwise it just mirrors thin crop.
+    const vals = (ex.values || []).filter((v) => v.key !== "ndwi" || v.spot > 0);
+    if (vals.length) {
+      box.append(el("div", { class: "lbl", text: "Here vs. field average" }));
+      box.append(el("ul", {}, vals.map((v) => el("li", {},
+        `${v.label.replace(/ \(.*\)/, "")}: ${fmt(v.spot)} vs ${fmt(v.field)} `,
+        el("span", { class: v.key === "ndwi" ? "" : v.diff < 0 ? "neg" : "pos", text: `(${signed(v.diff)})` })))));
+    }
+    if (ex.pattern && ex.pattern.length) {
+      box.append(el("div", { class: "lbl", text: "What we see" }), el("ul", {}, ex.pattern.map((p) => el("li", { text: p }))));
+    }
+    if (ex.causes && ex.causes.length) {
+      box.append(el("div", { class: "lbl", text: "Possible causes" }),
+        el("ul", {}, ex.causes.map((c, i) => {
+          const [head, ...rest] = c.cause.split(": ");
+          return el("li", {}, el("b", { text: head }), rest.length ? `: ${rest.join(": ")}` : "",
+            i === 0 ? el("div", { class: "hint", text: `Check: ${c.check}` }) : null);
+        })));
+    }
+    box.append(el("div", { class: "hint", text: "Satellite shows where, not why. Confirm on the ground." }));
+    box.append(el("a", { href: `https://www.google.com/maps/dir/?api=1&destination=${h.lat},${h.lon}`, target: "_blank", rel: "noopener", text: `Directions (${h.lat.toFixed(5)}, ${h.lon.toFixed(5)})` }));
+    return box;
+  }
+
   async function loadHotspots(o) {
     const box = $("hotspots");
     box.replaceChildren();
-    if (o.status !== "clear") { box.append(el("p", { class: "small muted", text: "This date is cloudy over the field; pick a clear date." })); return; }
+    if (o.status !== "clear") { box.append(el("p", { class: "small muted", text: "Too cloudy on this date. Pick another." })); return; }
     const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
     let res;
     try { res = await api(`/api/fields/${state.field.id}/observations/${o.id}/hotspots?index=${key}`); }
@@ -631,28 +647,35 @@
     if (o.id !== state.obsId) return;
     const name = state.indexByKey[key].name;
     if (!res.hotspots.length) {
-      box.append(el("p", { class: "small", text: `No significant low ${name} patches on ${res.date}. The field looks uniform at 10 m.` }));
+      box.append(el("p", { class: "small", text: `✓ No problem spots on ${res.date}. The field looks even.` }));
       return;
     }
-    const table = el("table", { class: "table small" });
-    table.append(el("tr", {}, ["#", "Location (lat, lon)", "Area", `${name}`, "Below median", ""].map((h) => el("th", { text: h }))));
+    const list = el("div", { class: "spot-list" });
     for (const h of res.hotspots) {
-      const coords = `${h.lat.toFixed(5)}, ${h.lon.toFixed(5)}`;
-      const outline = L.geoJSON(h.geometry, { style: { color: "#ff3b30", weight: 2, fillOpacity: 0.05 } });
-      const marker = L.marker([h.lat, h.lon], { title: `Hotspot ${h.rank}` })
-        .bindPopup(`<b>Hotspot ${h.rank}</b><br>${coords}<br>${h.area_ac} ac · ${name} ${fmt(h.mean)} (−${fmt(h.deficit)})`);
+      const outline = L.geoJSON(h.geometry, { style: { color: "#ff3b30", weight: 2, fillOpacity: 0.08 } });
+      const marker = L.marker([h.lat, h.lon], {
+        title: `Spot ${h.rank}`,
+        icon: L.divIcon({ className: "", html: `<div class="spot-marker">${h.rank}</div>`, iconSize: [24, 24], iconAnchor: [12, 12] }),
+      }).bindPopup(() => spotPopup(h, name), {
+        maxWidth: 290, maxHeight: Math.max(200, Math.min(380, Math.round(map.getSize().y * 0.6))), autoPanPadding: [12, 12],
+      });
       markersLayer.addLayer(outline);
       markersLayer.addLayer(marker);
-      table.append(el("tr", { class: "clickable", onclick: () => { map.setView([h.lat, h.lon], 17); marker.openPopup(); } },
-        el("td", { text: String(h.rank) }),
-        el("td", { text: coords }),
-        el("td", { text: `${fmt(h.area_ac, 1)} ac` }),
-        el("td", { text: fmt(h.mean) }),
-        el("td", { text: `−${fmt(h.deficit)}` }),
-        el("td", {}, el("a", { href: `https://www.google.com/maps/dir/?api=1&destination=${h.lat},${h.lon}`, target: "_blank", rel: "noopener", text: "Directions", onclick: (e) => e.stopPropagation() })),
+      const ndvi = (h.explain && h.explain.values || []).find((v) => v.key === "ndvi");
+      const top = h.explain && h.explain.causes && h.explain.causes[0];
+      list.append(el("button", { type: "button", class: "spot-row", onclick: () => {
+        map.setView([h.lat, h.lon], Math.max(map.getZoom(), 16), { animate: false });
+        marker.openPopup();
+        document.querySelectorAll(".spot-row").forEach((r) => r.classList.remove("active"));
+        list.children[h.rank - 1].classList.add("active");
+      } },
+        el("span", { class: "num", text: String(h.rank) }),
+        el("span", { class: "t", text: `${fmt(h.area_ac, 1)} ac` }),
+        el("span", { class: "d", text: ndvi ? `NDVI ${signed(ndvi.diff)} vs avg` : `${name} −${fmt(h.deficit)}` }),
+        el("span", { class: "s", text: top ? `Maybe: ${shortCause(top.cause)}` : "Tap for details" }),
       ));
     }
-    box.append(el("p", { class: "small", text: `Field median ${name} ${fmt(res.field_median)} on ${res.date}.` }), el("div", { class: "table-wrap" }, table));
+    box.append(list);
   }
 
   function renderAlerts() {
@@ -661,14 +684,10 @@
     if (!state.field || state.indexKey === "truecolor") return;
     api(`/api/fields/${state.field.id}/alerts?index=${state.indexKey}`).then((alerts) => {
       const label = { high: "▲ Alert", medium: "● Watch", pending: "◷ Pending", info: "○ Info" };
-      const scope = { field: "This field only", regional: "Regional", unknown: "" };
-      for (const a of alerts.slice(-3).reverse()) {
+      for (const a of alerts.slice(-2).reverse()) {
         box.append(el("div", { class: `alert ${a.severity}`, role: "status" },
-          el("span", { class: "icon", text: label[a.severity] || "● Watch" }),
-          el("span", {},
-            el("b", { text: `${a.date}: ` }),
-            a.scope && scope[a.scope] ? el("span", { class: `chip ${a.scope}`, text: scope[a.scope] }) : null,
-            " ", a.message)));
+          el("div", { class: "alert-title" }, el("span", { class: "icon", text: label[a.severity] || "● Watch" }), a.title || a.message),
+          a.points ? el("ul", {}, a.points.map((p) => el("li", { text: p }))) : null));
       }
     }).catch(() => {});
   }
@@ -679,7 +698,7 @@
     box.replaceChildren();
     const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
     const idx = state.indexByKey[key];
-    $("chart-title").textContent = `${idx.name} through the season`;
+    $("chart-title").textContent = `${idx.plain} this season`;
     const allPts = state.obs.filter((o) => o.status === "clear").map((o) => ({ o, t: Date.parse(o.datetime), s: o.stats[key] }));
     const pts = allPts.filter((p) => p.o.qa_status !== "suspect");
     const suspect = allPts.filter((p) => p.o.qa_status === "suspect");
@@ -792,18 +811,19 @@
       markersLayer.clearLayers();
       const colors = z.zones.map((_, i) => rgb(colorAt([[0, [215, 48, 39]], [0.33, [252, 141, 89]], [0.66, [145, 207, 96]], [1, [26, 152, 80]]], i / Math.max(1, z.n - 1))));
       setOverlay(z.png, z.bounds, {
-        title: `${state.indexByKey[key].name} zones (${z.mode})`,
-        items: z.zones.map((zz, i) => ({ color: colors[i], label: `Zone ${zz.zone}${i === 0 ? " (lowest)" : i === z.zones.length - 1 ? " (highest)" : ""}: ${zz.area_ac} ac` })),
+        title: `${state.indexByKey[key].plain} zones`,
+        items: z.zones.map((zz, i) => ({ color: colors[i], label: `Zone ${zz.zone}${i === 0 ? " (weakest)" : i === z.zones.length - 1 ? " (strongest)" : ""}` })),
       });
       out.replaceChildren();
-      if (z.warning) out.append(el("div", { class: "warning", text: z.warning }));
-      out.append(el("p", { class: "small muted", text: `${z.mode === "multi-date" ? `Built from ${z.dates.length} clear canopy dates (${z.dates[0]} → ${z.dates[z.dates.length - 1]}) as the mean standardized ${state.indexByKey[key].name}.` : `Built from ${z.dates[0]} only.`} Zones are relative to this field: a starting point for variable-rate or sampling plans, to be checked against yield maps and soil data.` }));
-      const t = el("table", { class: "table small" });
-      t.append(el("tr", {}, ["Zone", "Acres", "Hectares", "Share", z.mode === "multi-date" ? "Mean z-score" : "Mean value"].map((h) => el("th", { text: h }))));
-      z.zones.forEach((zz, i) => t.append(el("tr", {},
-        el("td", {}, el("span", { class: "swatch", style: `background:${colors[i]}` }), String(zz.zone)),
-        el("td", { text: fmt(zz.area_ac, 1) }), el("td", { text: fmt(zz.area_ha, 1) }), el("td", { text: pct(zz.share) }), el("td", { text: fmt(zz.mean) }))));
-      out.append(el("div", { class: "table-wrap" }, t));
+      if (z.warning) out.append(el("div", { class: "warning", text: "This date is too even for useful zones. Try \"Whole season\" or the Nitrogen layer." }));
+      const ul = el("ul", { class: "bullets small" });
+      z.zones.forEach((zz, i) => ul.append(el("li", {},
+        el("span", { class: "swatch", style: `background:${colors[i]}` }),
+        el("b", { text: `Zone ${zz.zone}${i === 0 ? " (weakest)" : i === z.zones.length - 1 ? " (strongest)" : ""}: ` }),
+        `${fmt(zz.area_ac, 1)} ac (${pct(zz.share)})`)));
+      ul.append(el("li", { text: z.mode === "multi-date" ? `Based on ${z.dates.length} images, ${z.dates[0]} → ${z.dates[z.dates.length - 1]}` : `Based on ${z.dates[0]} only` }));
+      ul.append(el("li", { text: "Use for sampling or variable-rate plans; check against yield maps" }));
+      out.append(ul);
     } catch (err) {
       out.replaceChildren(el("p", { class: "small", text: err.message }));
     }
@@ -834,37 +854,33 @@
       const c = await api(`/api/fields/${state.field.id}/change?${q}`);
       markersLayer.clearLayers();
       setOverlay(c.png, c.bounds, {
-        title: `${name} change ${c.before} → ${c.after}`,
+        title: `${state.indexByKey[key].plain}: ${c.before} → ${c.after}`,
         cmap: [[0, [178, 24, 43]], [0.25, [239, 138, 98]], [0.5, [247, 247, 247]], [0.75, [103, 169, 207]], [1, [33, 102, 172]]],
-        lo: `−${c.color_limit}`, hi: `+${c.color_limit}`, note: "Red = declined · blue = improved",
+        lo: "worse", hi: "better", note: "Red = got worse · blue = got better",
       });
       for (const h of c.decline_hotspots) {
         markersLayer.addLayer(L.geoJSON(h.geometry, { style: { color: "#ff3b30", weight: 2, fillOpacity: 0 } }));
         markersLayer.addLayer(L.marker([h.lat, h.lon]).bindPopup(`<b>Decline ${h.rank}</b><br>${h.lat.toFixed(5)}, ${h.lon.toFixed(5)}<br>${h.area_ac} ac`));
       }
-      const uniform = c.declined_share > 0.8 && !c.decline_hotspots.length;
-      out.replaceChildren(el("div", { class: "kpis" },
-        kpi("Median change", fmt(c.stats.median, 3)),
-        kpi(`Declined ≥ ${c.threshold}`, `${pct(c.declined_share)} · ${fmt(c.declined_ha * 2.471, 1)} ac`),
-        kpi(`Improved ≥ ${c.threshold}`, `${pct(c.improved_share)} · ${fmt(c.improved_ha * 2.471, 1)} ac`),
-        kpi("Decline patches", String(c.decline_hotspots.length)),
-      ));
-      const name2 = state.indexByKey[key].name;
-      if (c.ring_change != null) {
-        const regional = c.field_change < 0 && c.ring_change <= 0.6 * c.field_change;
-        out.append(el("p", { class: "small" },
-          el("b", { text: "Inside vs. outside the field: " }),
-          `field ${fmt(c.field_change, 3)}, neighbors (30–150 m outside) ${c.ring_change >= 0 ? "+" : ""}${fmt(c.ring_change, 3)} ${name2}. `,
-          c.field_change < -0.05 ? (regional ? "The neighbors changed similarly, so this is likely weather, haze, or area-wide crop stage." : "The neighbors held steady, so the change is specific to this field.") : ""));
+      const ul = el("ul", { class: "bullets small" });
+      const li = (k, v) => ul.append(el("li", {}, el("b", { text: `${k}: ` }), v));
+      li("Typical change", `${signed(c.stats.median)} ${name}`);
+      li("Got worse", `${fmt(c.declined_ha * 2.471, 1)} ac (${pct(c.declined_share)})`);
+      li("Got better", `${fmt(c.improved_ha * 2.471, 1)} ac (${pct(c.improved_share)})`);
+      if (c.ring_change != null && c.field_change < -0.05) {
+        const regional = c.ring_change <= 0.6 * c.field_change;
+        li("Neighbors", regional ? `also dropped (${signed(c.ring_change)}): likely weather, haze, or crop stage` : `held steady (${signed(c.ring_change)}): problem is in this field`);
+      } else if (c.declined_share > 0.8 && !c.decline_hotspots.length) {
+        li("Pattern", "whole field changed together (maturity, harvest, or a field-wide event)");
       }
-      out.append(el("p", { class: "small muted", text: `Compared on the ${pct(c.overlap)} of the field that was clear on both dates.` }));
-      for (const n of c.notes || []) out.append(el("div", { class: "warning", text: n }));
-      if (uniform) out.append(el("p", { class: "small muted", text: "The whole field changed together: typical of maturity, harvest, or a field-wide event (frost, hail), not a localized problem." }));
+      if (c.decline_hotspots.length) li("Problem patches", `${c.decline_hotspots.length} marked on the map`);
+      if (c.overlap < 0.95) li("Note", `compared on the ${pct(c.overlap)} of the field clear on both dates`);
+      out.replaceChildren(ul);
+      for (const n of c.notes || []) if (!/clear on both/.test(n)) out.append(el("div", { class: "warning small", text: n }));
     } catch (err) {
       out.replaceChildren(el("p", { class: "small", text: err.message }));
     }
   });
-  const kpi = (k, v) => el("div", { class: "kpi" }, el("div", { class: "k", text: k }), el("div", { class: "v", text: v }));
 
   // ---------- data table ---------------------------------------------------
   function renderTable() {
