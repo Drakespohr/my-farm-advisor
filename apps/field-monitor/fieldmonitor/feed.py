@@ -21,6 +21,8 @@ from . import disease, qa
 from .accounts import Accounts, new_id, now
 from .news import News
 from .prices import Prices
+from .score import field_score
+from .text import RECENT_DAYS, ago, nice_date
 from .store import Store
 from .weather import WeatherStore, hourly, summary
 
@@ -179,7 +181,9 @@ class Watcher:
         elif p.get("weather_note"):
             items.append({"kind": "weather", "level": "info", "title": "Weather", "points": [p["weather_note"]]})
         alerts = qa.assess(self.store, field_id, "ndvi")["alerts"]
-        recent = [a for a in alerts if a["kind"] != "senescence" and (not as_of or a["date"] <= as_of.isoformat())][-2:]
+        ref = as_of or datetime.now(timezone.utc).date()
+        cutoff = (ref - timedelta(days=RECENT_DAYS)).isoformat()
+        recent = [a for a in alerts if a["kind"] != "senescence" and cutoff <= a["date"] <= ref.isoformat()][-2:]
         for a in reversed(recent):
             items.append({"kind": "satellite", "level": a["severity"], "title": a.get("title") or a["message"], "points": a.get("points", [])[:2]})
         return {"pressure": {k: p[k] for k in ("score", "level", "top", "as_of", "crop_kind", "method")},
@@ -359,7 +363,7 @@ def make_router(
         community (posts and reports everywhere), market (listings), fields (my field alerts)."""
         pts = my_points(user)
         items: list[dict[str, Any]] = []
-        since = (datetime.now(timezone.utc) - timedelta(days=30)).replace(microsecond=0).isoformat()
+        since = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).replace(microsecond=0).isoformat()
         near = lambda lat, lon: (dist_km(pts, lat, lon) or 1e9) <= NEAR_KM  # noqa: E731
 
         if section in ("all", "local", "community"):
@@ -443,7 +447,7 @@ def make_router(
                 if f.get("archived"):
                     continue
                 for a in qa.assess(store, fid, "ndvi")["alerts"][-2:]:
-                    if a["kind"] == "senescence":
+                    if a["kind"] == "senescence" or a["date"] < since[:10]:
                         continue
                     items.append({"type": "field", "id": f"{fid}:{a['date']}:{a['kind']}", "time": a["date"] + "T12:00:00+00:00",
                                   "field_id": fid, "field": f["name"], "title": a.get("title") or a["message"],
@@ -459,5 +463,86 @@ def make_router(
         roundup = [i for i in items if i["type"] == "roundup"]
         rest = sorted([i for i in items if i["type"] != "roundup"], key=lambda i: i["time"], reverse=True)
         return (roundup + rest)[:100]
+
+    # ---- daily brief ----------------------------------------------------------------
+    def field_brief(f: dict[str, Any], role: str, today: date) -> dict[str, Any]:
+        obs = qa.classify(store.list_observations(f["id"]))
+        ok = [o for o in obs if o.get("qa_status") == "ok"]
+        cutoff = (today - timedelta(days=RECENT_DAYS)).isoformat()
+        latest = ok[-1] if ok else None
+        age = (today - date.fromisoformat(latest["date"])).days if latest else None
+        fresh = latest is not None and age is not None and age <= RECENT_DAYS
+        out: dict[str, Any] = {"id": f["id"], "name": f["name"], "crop": f.get("crop"), "area_ac": f["area_ac"], "role": role,
+                               "image": None, "change": None, "trend": [], "alerts": [], "pressure": None}
+        if latest:
+            out["image"] = {"date": latest["date"], "label": nice_date(latest["date"], today), "age_days": age, "fresh": fresh,
+                            "ndvi": latest["stats"]["ndvi"]["median"]}
+            prev = [o for o in ok if 5 <= (date.fromisoformat(latest["date"]) - date.fromisoformat(o["date"])).days <= 21]
+            if prev:
+                p0 = prev[-1]
+                d = latest["stats"]["ndvi"]["median"] - p0["stats"]["ndvi"]["median"]
+                out["change"] = {"since": nice_date(p0["date"], today), "delta": round(d, 3),
+                                 "word": "greener" if d >= 0.03 else "less green" if d <= -0.03 else "steady"}
+            # "Season so far": this calendar year's good images.
+            year = str(today.year) if fresh else latest["date"][:4]
+            out["trend"] = [{"date": o["date"], "v": o["stats"]["ndvi"]["median"]} for o in ok if o["date"].startswith(year)]
+        sc = field_score(obs)
+        out["score"] = {k: sc.get(k) for k in ("score", "label", "status", "as_of")}
+        if sc.get("as_of"):
+            out["score"]["as_of_label"] = nice_date(sc["as_of"], today)
+        try:
+            p = watcher.pressure(f["id"])
+            out["pressure"] = {"score": p["score"], "level": p["level"], "top": p["top"]}
+            top_d = p["diseases"][0] if p["diseases"] else None
+        except Exception:
+            top_d = None
+        out["alerts"] = [{"date": a["date"], "title": a.get("title") or a["message"], "severity": a["severity"], "status": a.get("status")}
+                         for a in qa.alerts(store, f["id"], obs, "ndvi") if a["kind"] != "senescence" and a["date"] >= cutoff][-2:]
+
+        # One plain sentence: the most useful thing to know about this field today.
+        high = [a for a in out["alerts"] if a["severity"] == "high"]
+        if high:
+            headline, priority = f"{high[-1]['title']}. Scout the low spots.", 3
+        elif out["pressure"] and out["pressure"]["level"] == "High" and top_d:
+            headline, priority = f"{top_d['name']} risk is high. Look for: {top_d['watch'].lower()}.", 3
+        elif out["alerts"]:
+            a = out["alerts"][-1]
+            nxt = {"pending": "Waiting for the next clear image to confirm; scout if you're nearby.",
+                   "confirmed": "Confirmed on the next image. Scout the low spots.",
+                   "recovered": "It bounced back; no action needed."}.get(a.get("status") or "", "Check the Scout tab.")
+            headline, priority = f"{a['title']}. {nxt}", 1 if a.get("status") == "recovered" else 2
+        elif not latest:
+            headline, priority = "Waiting for the first clear satellite image.", 1
+        elif not fresh:
+            headline, priority = f"No clear image in the last {RECENT_DAYS} days (clouds). Last one: {out['image']['label']}.", 1
+        elif out["pressure"] and out["pressure"]["level"] == "Moderate" and top_d:
+            headline, priority = f"{top_d['name']} risk is moderate. Worth a look on your next pass.", 2
+        elif out["change"]:
+            c = out["change"]
+            headline = {"greener": f"Getting greener: crop health up {c['delta']:.2f} since {c['since']}.",
+                        "less green": f"Crop health down {abs(c['delta']):.2f} since {c['since']}. Check the Scout tab.",
+                        "steady": f"Steady since {c['since']}. Nothing new to act on."}[c["word"]]
+            priority = 2 if c["word"] == "less green" else 0
+        else:
+            headline, priority = f"New image {ago(age or 0)}. Nothing new to act on.", 0
+        out["headline"], out["priority"] = headline, priority
+        return out
+
+    @r.get("/api/brief")
+    def brief(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        today = datetime.now(timezone.utc).date()
+        fields = []
+        for fid, role in accounts.fields_for(user["id"]).items():
+            try:
+                f = store.get_field(fid)
+            except KeyError:
+                continue
+            if not f.get("archived"):
+                fields.append(field_brief(f, role, today))
+        fields.sort(key=lambda b: (-b["priority"], b["name"]))
+        priorities = [{"field_id": b["id"], "field": b["name"], "text": b["headline"]} for b in fields if b["priority"] >= 2][:3]
+        local = [i for i in feed(section="local", user=user) if i["type"] in ("roundup", "report", "storm")][:4]
+        return {"date": today.isoformat(), "date_label": f"{today:%A}, {today:%B} {today.day}", "name": (accounts.profile(user["id"]) or {}).get("display_name"),
+                "priorities": priorities, "fields": fields, "local": local, "prices": prices.board(), "recent_days": RECENT_DAYS}
 
     return r

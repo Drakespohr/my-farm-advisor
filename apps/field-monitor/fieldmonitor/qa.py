@@ -153,7 +153,7 @@ def alerts(store: Store, field_id: str, observations: list[dict[str, Any]], inde
 
             where = {
                 "field": "Neighbors outside the field held steady, so this is specific to this field (management, disease, pests, drainage, hail strip).",
-                "regional": f"Neighbors outside the field changed too ({ring:+.2f}), so this is likely weather, haze, or area-wide crop stage.",
+                "regional": f"Neighbors outside the field changed too ({ring or 0:+.2f}), so this is likely weather, haze, or area-wide crop stage.",
                 "unknown": "Not enough clear ground outside the field to tell field-specific from regional.",
             }[scope]
             change = f"Median {name} {m_prev:.2f} → {m_cur:.2f} ({-drop:+.2f}) over {gap} days"

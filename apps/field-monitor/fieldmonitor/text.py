@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+# What the app presents as "current": anything older stays available (history, Data tab)
+# but isn't shown as today's news.
+RECENT_DAYS = 14
+
 
 def nice_date(iso: str, today: date | None = None) -> str:
     """'2025-07-01' -> 'Jul 1' this year, 'Jul 1, 2025' otherwise."""

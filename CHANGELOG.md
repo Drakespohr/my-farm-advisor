@@ -5,6 +5,7 @@ Docs: https://docs.openclaw.ai
 ## Unreleased
 ### Changes
 
+- Overacre daily brief: a "Today" landing page (priorities, field cards with score, risk, crop-health change and season trend, nearby reports) and a 14-day recency rule across the brief, alerts, watch list, and News; fixes a crash in alert wording when neighbor data is missing.
 - Overacre field view: at-a-glance tiles (field score ring /100, disease risk meter, crop health bar), disease-risk bars and weather tiles in "Things to watch", a Manage menu, and friendly dates/units everywhere (e.g. "Crop health fell 27% · Jul 1 → Jul 6", "0–1 scale", miles).
 - Overacre prices/news: free USDA AMS cash grain bids (server-side `USDA_AMS_API_KEY`, auto-selected by your fields' states, `fieldmonitor usda-check`), and the News "All" tab is now the same for every member (personal alerts move to "My fields").
 - Overacre News: the Feed becomes News with a corn/soybean/wheat price board (manual/admin entry, CSV import, optional licensed Barchart futures), Local (county-labeled reports, NOAA storm reports near your fields, weekly roundup) and National (RSS headlines) sections, and source health for admins.

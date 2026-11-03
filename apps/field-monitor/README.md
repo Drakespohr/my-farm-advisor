@@ -22,6 +22,25 @@ points, management zones, and before/after change maps.
   append-only `lineage.jsonl`. Every result records its scene, asset URLs, processing
   version, and git commit.
 
+## Today: the daily brief
+
+After login the app opens on **Today**, a morning brief across all of your fields:
+
+- **Greeting and date**, then **Today's priorities**: up to three one-line actions, e.g. "Creek
+  Bottom: Crop health fell 23% · Oct 25 → Oct 30. Waiting for the next clear image to confirm;
+  scout if you're nearby."
+- **Prices** (when any exist).
+- **Your fields**: one card per field with the score ring, disease-risk chip, crop health (NDVI,
+  0–1) with its change since the previous image, a "season so far" trend line, one plain
+  headline, and how old the latest image is.
+- **Near you this week**: the local roundup, field reports, and storm reports.
+
+**Two-week rule:** the brief, alerts, the watch list, and News show only the last 14 days
+(`RECENT_DAYS` in `fieldmonitor/text.py`). Older images and history stay on each field's chart,
+date picker, and Data tab. A field with no clear image for two weeks says so plainly ("No clear
+image in the last 14 days (clouds). Last one: Sep 23.") instead of presenting old numbers as
+current.
+
 ## Accounts, sharing, and the marketplace
 
 The monitoring is the backbone of a small ag-business network:
@@ -375,7 +394,7 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 93 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 96 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel

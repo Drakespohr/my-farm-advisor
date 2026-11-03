@@ -123,3 +123,10 @@ def test_sync_reprocesses_stale_versions(store, monkeypatch):
     assert rec["id"] in s.due_fields()
     s.wait(s.start(rec["id"], "manual"))
     assert processed == ["S2A_X"]
+
+
+def test_decline_without_neighbor_data_does_not_crash(store, fid):
+    add_obs(store, fid, "2025-07-01", field_at(0.85, 1), qa={})
+    add_obs(store, fid, "2025-07-06", field_at(0.62, 2), qa={})
+    a = run(store, fid)["alerts"]
+    assert a and a[0]["scope"] == "unknown"
