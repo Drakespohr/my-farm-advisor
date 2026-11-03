@@ -36,7 +36,7 @@ def test_validation_rejects_bad_payloads(client):
     ]
     for p in bad:
         assert client.post(f"/api/seasons/{sid}/events", json={"occurred_at": "2026-06-01T00:00:00", "payload": p}).status_code == 422
-    future = (dt.datetime.utcnow() + dt.timedelta(days=3)).isoformat()
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3)).isoformat()
     assert client.post(f"/api/seasons/{sid}/events", json={"occurred_at": future, "payload": {"kind": "rainfall", "amount_in": 1, "source": "estimate"}}).status_code == 422
 
 

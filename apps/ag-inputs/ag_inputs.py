@@ -10,8 +10,11 @@ Add to the existing FastAPI app:
     from ag_inputs import router as inputs_router, init_db
     app.include_router(inputs_router)
 
+Schema changes are managed with Alembic (see README). Apply them with
+`alembic upgrade head` (or call init_db(), which does the same) before serving.
+
 Run on its own for testing:
-    uvicorn ag_inputs:app --reload
+    alembic upgrade head && uvicorn ag_inputs:app --reload
 
 Set AG_DATABASE_URL to a Postgres URL (e.g. AWS RDS) for production.
 """
@@ -315,7 +318,20 @@ def build_context(season: SeasonRow, rows: list[EventRow], as_of: dt.datetime) -
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    """Bring the database schema up to date by applying Alembic migrations.
+
+    Kept for callers that import it; it no longer uses create_all. Most deployments
+    should run `alembic upgrade head` as a release step instead.
+    """
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(Path(__file__).with_name("alembic.ini")))
+    cfg.attributes["url"] = DATABASE_URL
+    cfg.attributes["skip_logging"] = True
+    command.upgrade(cfg, "head")
 
 
 def get_session():
@@ -407,6 +423,5 @@ def diagnosis_context(
     return build_context(season, list(rows), cutoff)
 
 
-init_db()
 app = FastAPI(title="Ag field inputs")
 app.include_router(router)
