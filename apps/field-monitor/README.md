@@ -83,7 +83,29 @@ Small airport stations often don't report rain; the app says "not reported" rath
 or from their location. Locations are rounded to ~1 km. Reports feed nearby fields' pressure
 immediately and (optionally) post to the feed.
 
-**Feed:** posts, field reports, new marketplace listings, and alerts on your own fields
+**News** (the old Feed): a price board for corn, soybeans, and wheat at the top, then sections:
+All · Local · National · Community · Marketplace · My fields.
+
+- **Local:** a weekly roundup ("This week near your fields: Southern rust: 3 reports (Lucas,
+  Wayne)"), community reports labeled by county ("Southern rust spotted in Lucas County, IA"),
+  and NOAA storm reports within ~100 mi of your fields ("Hail (1.75 in) reported near 3 S
+  Chariton, Lucas County, IA"). County names come from US Census boundaries.
+- **National:** headlines from RSS/Atom sources (title, short summary, link to the publisher).
+- **Sources** are server-side, refreshed every 2 h, and never fatal when they fail. Defaults are in
+  `fieldmonitor/news.py` (`DEFAULT_SOURCES`); override with `$FIELD_MONITOR_DATA/news_sources.json`.
+  The defaults (SPC hail/wind CSVs, farmdoc daily, USDA releases) were written without network
+  access to verify them, so check `GET /api/news/sources` (admin) after the first refresh.
+
+**Prices:** each card shows $/bu, change in cents with ▲/▼, a short trend line, and the type,
+source, and time, so a manual cash bid is never mistaken for a live quote.
+- Manual/admin: "Update prices" on the News page, `fieldmonitor set-price corn 4.32 --source
+  "Chariton Co-op"`, or `fieldmonitor import-prices bids.csv --source ...`.
+- Live futures: set `BARCHART_API_KEY` (Barchart OnDemand, licensed exchange data; delayed CBOT
+  quotes refresh every 15 min). Other licensed feeds (DTN, CME) can be added in `prices.py`.
+  Free public-domain cash bids from USDA AMS MyMarketNews (free API key) are a good next
+  provider once the report IDs are confirmed.
+
+**Feed items:** posts, field reports, new marketplace listings, and alerts on your own fields
 (confirmed declines, disease pressure rising to Moderate/High). Filters: All, Near me (within
 ~100 mi of your fields), Reports, Posts, Marketplace, My fields. Posts can be tagged to a
 field's area (rounded), marked Helpful, commented on, and reported.
@@ -325,7 +347,7 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 84 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 88 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel
@@ -333,7 +355,8 @@ comparison, pending/confirmed/recovered, field vs. regional scope, stale-version
 hotspot cause rules for water, strips, nitrogen, dry spots, persistent vs. new, edges, stand,
 accounts/login/CSRF, private fields and view-only sharing, listings, messages, unread counts,
 profile showcase, the field score incl. season end, disease pressure rules, weather parsers
-(NWS, Open-Meteo, NOAA ISD), report privacy rounding, and the feed). No network is needed.
+(NWS, Open-Meteo, NOAA ISD), report privacy rounding, the feed, RSS/Atom and SPC parsing,
+local vs. national news, county labels, the roundup, and the price board). No network is needed.
 
 ## Limitations and next steps
 
