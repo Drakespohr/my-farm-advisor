@@ -5,6 +5,7 @@ Docs: https://docs.openclaw.ai
 ## Unreleased
 ### Changes
 
+- Overacre prices/news: free USDA AMS cash grain bids (server-side `USDA_AMS_API_KEY`, auto-selected by your fields' states, `fieldmonitor usda-check`), and the News "All" tab is now the same for every member (personal alerts move to "My fields").
 - Overacre News: the Feed becomes News with a corn/soybean/wheat price board (manual/admin entry, CSV import, optional licensed Barchart futures), Local (county-labeled reports, NOAA storm reports near your fields, weekly roundup) and National (RSS headlines) sections, and source health for admins.
 - Overacre: disease pressure per field (southern rust, tar spot, gray leaf spot, NCLB, white mold, frogeye) from weather (NWS / optional Open-Meteo / NOAA ISD history), nearby community field reports, and crop stage; a "Things to watch" list under the field score; field reports with ~1 km location rounding; and a news feed of posts, reports, listings, and field alerts with helpful votes and comments.
 - Farm/field monitor: rename the product to **Overacre** (working name) via a single `APP_NAME` constant; the `fieldmonitor` package and command are unchanged.

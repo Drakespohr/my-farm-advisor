@@ -20,7 +20,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -57,12 +57,21 @@ class Prices:
         if kind not in ("cash", "futures"):
             raise ValueError("kind must be cash or futures")
         with self.accounts.db() as c:
-            if change is None:  # derive the change from the previous price of the same kind
-                prev = c.execute("SELECT price FROM prices WHERE commodity=? AND kind=? ORDER BY as_of DESC, id DESC LIMIT 1",
-                                 (commodity, kind)).fetchone()
+            if change is None:  # derive the change from the previous price from the same source
+                prev = c.execute("SELECT price FROM prices WHERE commodity=? AND kind=? AND source=? AND as_of<=? ORDER BY as_of DESC, id DESC LIMIT 1",
+                                 (commodity, kind, source[:80], as_of or now())).fetchone()
                 change = round(price - prev["price"], 4) if prev else None
             c.execute("INSERT INTO prices (commodity, price, unit, change, kind, contract, source, as_of, created) VALUES (?,?,?,?,?,?,?,?,?)",
                       (commodity, round(price, 4), unit, change, kind, contract, source[:80], as_of or now(), now()))
+
+    def add_if_new(self, commodity: str, price: float, **kw: Any) -> bool:
+        """Add unless this source already has a price for this commodity at this time."""
+        with self.accounts.db() as c:
+            if c.execute("SELECT 1 FROM prices WHERE commodity=? AND source=? AND as_of=?",
+                         (commodity, kw.get("source", "Manual entry")[:80], kw.get("as_of"))).fetchone():
+                return False
+        self.add(commodity, price, **kw)
+        return True
 
     def import_csv(self, text: str, source: str) -> int:
         """Columns: commodity, price[, change, kind, contract, as_of]."""
@@ -87,7 +96,8 @@ class Prices:
                 pct = (latest["change"] / (latest["price"] - latest["change"]) * 100) if latest["change"] not in (None, 0) and latest["price"] != latest["change"] else (0.0 if latest["change"] == 0 else None)
                 out.append({"key": key, **meta, "price": latest["price"], "change": latest["change"], "pct": round(pct, 2) if pct is not None else None,
                             "kind": latest["kind"], "contract": latest["contract"], "source": latest["source"], "as_of": latest["as_of"], "history": hist})
-        return {"commodities": out, "live_feed": bool(os.environ.get("BARCHART_API_KEY"))}
+        return {"commodities": out, "live_feed": bool(os.environ.get("BARCHART_API_KEY")),
+                "usda": bool(os.environ.get("USDA_AMS_API_KEY"))}
 
     # ---- Barchart (optional, licensed) ------------------------------------------------
     def fetch_barchart(self) -> int:
@@ -109,15 +119,25 @@ class Prices:
             n += 1
         return n
 
-    def start(self, every_s: float = 900) -> None:
-        if not os.environ.get("BARCHART_API_KEY"):
+    def start(self, states: Callable[[], list[str]] | None = None, every_s: float = 900) -> None:
+        """Background refresh: Barchart futures every 15 min, USDA cash bids every 3 h (when keys are set)."""
+        from . import usda_ams
+
+        if not os.environ.get("BARCHART_API_KEY") and not usda_ams.api_key():
             return
 
         def loop() -> None:
+            last_usda = 0.0
             while True:
                 try:
                     self.fetch_barchart()
                 except Exception as exc:
-                    log.warning("price fetch failed: %s", exc)
+                    log.warning("Barchart fetch failed: %s", exc)
+                if usda_ams.api_key() and time.time() - last_usda > 3 * 3600:
+                    try:
+                        log.info("USDA cash bids: %s", usda_ams.sync_prices(self, states() if states else []))
+                        last_usda = time.time()
+                    except Exception as exc:
+                        log.warning("USDA AMS fetch failed: %s", exc)
                 time.sleep(every_s)
         threading.Thread(target=loop, daemon=True, name="prices").start()

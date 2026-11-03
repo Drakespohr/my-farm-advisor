@@ -84,7 +84,10 @@ or from their location. Locations are rounded to ~1 km. Reports feed nearby fiel
 immediately and (optionally) post to the feed.
 
 **News** (the old Feed): a price board for corn, soybeans, and wheat at the top, then sections:
-All · Local · National · Community · Marketplace · My fields.
+All · Local · National · Community · Marketplace · My fields. **All** and the price board are
+identical for every member (network-wide roundup, the latest storm reports, national news,
+community posts, listings). **Local** (near my fields) and **My fields** (my alerts) are the
+personal views.
 
 - **Local:** a weekly roundup ("This week near your fields: Southern rust: 3 reports (Lucas,
   Wayne)"), community reports labeled by county ("Southern rust spotted in Lucas County, IA"),
@@ -102,8 +105,27 @@ source, and time, so a manual cash bid is never mistaken for a live quote.
   "Chariton Co-op"`, or `fieldmonitor import-prices bids.csv --source ...`.
 - Live futures: set `BARCHART_API_KEY` (Barchart OnDemand, licensed exchange data; delayed CBOT
   quotes refresh every 15 min). Other licensed feeds (DTN, CME) can be added in `prices.py`.
-  Free public-domain cash bids from USDA AMS MyMarketNews (free API key) are a good next
-  provider once the report IDs are confirmed.
+- **Free USDA cash bids** (public domain): see below.
+
+### Free USDA cash bids (admin setup, once)
+
+The server fetches USDA AMS Market News grain bids every 3 hours and shows the median bid per
+crop (e.g. "Cash bid (14 locations) · USDA AMS · Iowa Daily Grain Bids") to **every** member.
+Members never need a key.
+
+1. Create a free account at https://mymarketnews.ams.usda.gov (register, then **My Profile** →
+   API key). The account and key are yours; keep the key private and never commit it.
+2. Give it to the server as an environment variable, e.g. on a Mac:
+   `echo 'export USDA_AMS_API_KEY="paste-key-here"' >> ~/.zshrc && source ~/.zshrc`
+3. Test it: `uv run fieldmonitor usda-check` (lists matching "<State> … Grain Bids" reports for
+   your fields' states, and the prices parsed from the first one).
+4. Restart `uv run fieldmonitor serve`. Prices refresh on their own.
+
+Report selection is automatic by the states your fields are in. If members farm in several
+states, pin the report(s) the shared board should use, e.g.
+`export FIELD_MONITOR_AMS_REPORTS="2850"` (ids are printed by `usda-check`). The MARS response
+format couldn't be tested from the build sandbox; if `usda-check` parses no prices, its output
+shows the field names needed to adjust `usda_ams.py`.
 
 **Feed items:** posts, field reports, new marketplace listings, and alerts on your own fields
 (confirmed declines, disease pressure rising to Moderate/High). Filters: All, Near me (within
@@ -347,7 +369,7 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 88 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 92 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel

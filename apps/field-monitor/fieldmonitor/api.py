@@ -31,6 +31,7 @@ from . import APP_NAME, APP_TAGLINE, PROCESSING_VERSION, __version__, analysis, 
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
 from .news import News
+from .usda_ams import STATE_FULL
 from .prices import Prices
 from .social import make_router
 from .weather import WeatherStore
@@ -96,7 +97,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         if refresh_hours:
             watcher.start()  # keep disease pressure current even when nobody has the app open
             news.start()
-            prices.start()
+            prices.start(lambda: field_states())
         yield
         syncer.stop()
 
@@ -109,6 +110,17 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     news = News(accounts, store.root)
     prices = Prices(accounts)
     app.state.news, app.state.prices = news, prices
+
+    def field_states() -> list[str]:
+        """Full state names for all active fields (used to pick USDA grain bid reports)."""
+        out: list[str] = []
+        for f in store.list_fields():
+            c = shape(f["geometry"]).centroid
+            county = news.counties.lookup(c.y, c.x)
+            name = STATE_FULL.get(county["state"]) if county else None
+            if name and name not in out:
+                out.append(name)
+        return out
 
     @app.middleware("http")
     async def csrf_guard(request: Request, call_next: Any) -> Any:
