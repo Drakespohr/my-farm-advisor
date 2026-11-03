@@ -4,7 +4,87 @@ FastAPI + SQLAlchemy service for logging Nebraska corn, soybean, and wheat field
 (planting, fertilizer, foliar, irrigation, scouting, soil tests, harvest, and more), with
 per-farm access control, append-only events, shared drafts, and NRD reporting checks.
 
-Run and test commands are at the end of this file.
+Files:
+
+| File | What it holds |
+|---|---|
+| `ag_inputs.py` | Tables, event payload schemas, API endpoints, record deadlines |
+| `auth.py` | `AuthProvider` interface (`disabled`, `dev`, `cognito` placeholder) |
+| `nrd_rules.py` | NRD configs (all unverified) and the season check |
+| `reports.py` | Season CSV export and N summary |
+| `streamlit_app.py`, `ui_client.py` | Streamlit prototype (calls the API over HTTP) |
+| `manage.py` | Create a farm and assign legacy fields to it |
+| `migrations/` | Alembic migrations (0001 = the original schema) |
+
+## Settings (environment variables)
+
+| Variable | Default | Use |
+|---|---|---|
+| `AG_DATABASE_URL` | `sqlite:///ag_monitor.db` | e.g. `postgresql+psycopg://...` for RDS. Keep it out of code. |
+| `AG_AUTH_MODE` | `disabled` (every request 401) | `dev` = identity from `X-Dev-User` headers (local only); `cognito` = placeholder (501) |
+| `AG_COGNITO_REGION`, `AG_COGNITO_USER_POOL_ID`, `AG_COGNITO_APP_CLIENT_ID` | — | Read by `CognitoAuth` once it's implemented |
+| `AG_API_URL` | `http://localhost:8000` | Streamlit → API |
+| `AG_API_TOKEN` | — | Bearer token the Streamlit page sends (for Cognito later) |
+| `AG_UI_DEV_USER` | — | Pre-fills the dev sign-in box |
+| `AG_UI_TZ` | `America/Chicago` | Time zone for entered times (`America/Denver` for the Panhandle) |
+| `AG_UI_REFRESH_SECONDS` | `10` | Live panel refresh (`st.fragment(run_every=...)`) |
+
+## Access model
+
+- Fields belong to a farm. Roles per farm: `owner`, `operator`, `applicator`, `scout`, `viewer`.
+- Read: any member. Write events and drafts: everyone but `viewer`. Fields and seasons: owner, operator.
+  Members: owner. Non-members get 404 (farm existence isn't revealed).
+- Events are append-only (ORM guard + database triggers). A correction is a new event with
+  `supersedes_id`; it must be the same season and kind, and an event can be superseded once.
+  Reads, the diagnosis context, NRD check, and exports use the corrected view.
+- Drafts: one per user, form type, and season. `GET /api/seasons/{id}/drafts` shows everyone's
+  open drafts (who's working on what); content is only returned for your own.
+
+## Record deadlines (foliar)
+
+`record_due_by` = occurred_at + 14 days for private applicators on restricted-use products, and
++48 hours for commercial/noncommercial applicators (all their applications, as written in the
+brief). `recorded_late` = the row was created after that. Confirm both windows with the
+Nebraska Department of Agriculture before relying on them.
+
+## Upgrading an existing database
+
+The original file called `create_all` at import. That's gone. For a database it already built:
+
+```bash
+alembic stamp 0001        # mark the original schema as present (no changes)
+alembic upgrade head      # add farms/users/drafts, new columns, append-only triggers
+python -c "import manage; f = manage.create_farm('My Farm', 'you@example.com'); manage.assign_fields(f, [1, 2, 3])"
+```
+
+No rows are deleted or rewritten. Existing fields keep `farm_id = NULL` (invisible through the API)
+until assigned. The `you@example.com` user must have signed in once first.
+
+## Run
+
+```bash
+cd apps/ag-inputs
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+
+export AG_DATABASE_URL=sqlite:///ag_monitor.db   # or your RDS URL
+export AG_AUTH_MODE=dev                          # local only
+alembic upgrade head
+uvicorn ag_inputs:app --reload --port 8000       # API docs at http://localhost:8000/docs
+
+# second terminal
+AG_AUTH_MODE=dev AG_API_URL=http://localhost:8000 streamlit run streamlit_app.py
+```
+
+## Test
+
+```bash
+cd apps/ag-inputs && pytest -q
+```
+
+Tests use a temporary SQLite database and dev auth. They cover restricted-use validation, record
+deadlines, roles, append-only corrections (ORM and triggers), drafts, NRD checks, CSV export and N
+summary, migrations vs models (drift), and the Streamlit page (via `streamlit.testing`).
 
 ## NRD verification TODOs
 
