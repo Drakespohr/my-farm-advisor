@@ -353,7 +353,8 @@ def make_router(
     @r.get("/api/feed")
     def feed(section: str = Query("all", pattern="^(all|local|national|community|market|fields)$"),
              user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
-        """Sections: local (near my fields: reports, storms, roundup), national (news),
+        """Sections: all (identical for every member: everything network-wide except personal
+        field alerts), local (near my fields: reports, storms, roundup), national (news),
         community (posts and reports everywhere), market (listings), fields (my field alerts)."""
         pts = my_points(user)
         items: list[dict[str, Any]] = []
@@ -385,11 +386,18 @@ def make_router(
                               "helpful": x["helpful"], "mine": bool(x["mine"]), "comments": x["comments"],
                               "disease": x["disease"], "severity": x["severity"], "observed": x["observed"], "place": x.get("place")})
 
+        storms_shown = 0
         if section in ("all", "local", "national"):
             for n in news.items(since):
                 if n["scope"] == "local":
-                    if section == "national" or n["lat"] is None or not near(n["lat"], n["lon"]):
+                    if section == "national" or n["lat"] is None:
                         continue
+                    if section == "local" and not near(n["lat"], n["lon"]):
+                        continue
+                    if section == "all":
+                        storms_shown += 1
+                        if storms_shown > 15:  # everywhere-storms can number hundreds a day; keep the shared view readable
+                            continue
                     d = dist_km(pts, n["lat"], n["lon"])
                     items.append({"type": "storm", "id": n["id"], "time": n["published"], "title": n["title"], "body": n["summary"],
                                   "source": n["source_name"], "miles": round(d * 0.621) if d is not None else None, "place": n["place"]})
@@ -397,15 +405,15 @@ def make_router(
                     items.append({"type": "news", "id": n["id"], "time": n["published"], "title": n["title"], "body": n["summary"],
                                   "url": n["url"], "source": n["source_name"]})
 
-        if section in ("all", "local") and pts:
-            # Weekly roundup of reports near my fields, grouped by problem and county.
+        if section == "all" or (section == "local" and pts):
+            # Weekly roundup grouped by problem and county: network-wide on "all", near my fields on "local".
             week = (datetime.now(timezone.utc).date() - timedelta(days=7)).isoformat()
             with accounts.db() as c:
                 recent = [dict(x) for x in c.execute("SELECT disease, place, lat, lon FROM crop_reports WHERE observed>=?", (week,))]
             groups: dict[str, set[str]] = {}
             counts: dict[str, int] = {}
             for x in recent:
-                if near(x["lat"], x["lon"]):
+                if section == "all" or near(x["lat"], x["lon"]):
                     nm = names.get(x["disease"], x["disease"])
                     counts[nm] = counts.get(nm, 0) + 1
                     if x["place"]:
@@ -413,7 +421,8 @@ def make_router(
             if counts:
                 pts_txt = [f"{nm}: {n} report{'s' if n > 1 else ''}" + (f" ({', '.join(sorted(groups.get(nm, []))[:3])})" if groups.get(nm) else "")
                            for nm, n in sorted(counts.items(), key=lambda kv: -kv[1])]
-                items.append({"type": "roundup", "id": f"roundup:{week}", "time": now(), "title": "This week near your fields", "points": pts_txt})
+                title = "This week across Overacre" if section == "all" else "This week near your fields"
+                items.append({"type": "roundup", "id": f"roundup:{section}:{week}", "time": now(), "title": title, "points": pts_txt})
 
         if section in ("all", "market"):
             with accounts.db() as c:
@@ -424,7 +433,7 @@ def make_router(
                                   "author_id": x["user_id"], "title": x["title"], "body": x["description"], "price": x["price"],
                                   "location": x["location"]})
 
-        if section in ("all", "fields"):
+        if section == "fields":  # personal alerts stay out of the shared "all" view
             for fid in accounts.fields_for(user["id"]):
                 try:
                     f = store.get_field(fid)

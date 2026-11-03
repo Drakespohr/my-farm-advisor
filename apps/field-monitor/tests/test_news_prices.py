@@ -72,5 +72,7 @@ def test_news_items_local_vs_national(app, store):
     assert [i["title"] for i in local if i["type"] == "storm"] == ["Hail (1.25 in) reported near Ames, Story County, IA"]
     national = c.get("/api/feed?section=national").json()
     assert [i["type"] for i in national] == ["news"] and national[0]["url"] == "https://example.org/corn-yield"
-    assert {"storm", "news"} <= {i["type"] for i in c.get("/api/feed").json()}
+    everything = c.get("/api/feed").json()
+    assert {i["title"] for i in everything if i["type"] == "storm"} == {
+        "Hail (1.25 in) reported near Ames, Story County, IA", "Hail (1.25 in) reported near Far Away, Kern County, CA"}
     assert c.get("/api/news/sources").status_code == 200  # first account is admin

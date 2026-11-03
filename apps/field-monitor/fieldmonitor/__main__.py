@@ -89,6 +89,46 @@ def _cmd_import_prices(args: argparse.Namespace) -> None:
     print(f"imported {n} prices from {args.csv}")
 
 
+def _cmd_usda_check(args: argparse.Namespace) -> None:
+    """Show which USDA reports match and what one returns, to confirm the setup works."""
+    from . import usda_ams
+
+    key = usda_ams.api_key()
+    if not key:
+        sys.exit("USDA_AMS_API_KEY is not set. See README: 'Free USDA cash bids'.")
+    states = args.state or []
+    if not states:
+        from .accounts import Accounts
+        from .news import News
+        from shapely.geometry import shape
+
+        store = Store.from_env()
+        news = News(Accounts(store.root / "app.db"), store.root)
+        for f in store.list_fields():
+            c = shape(f["geometry"]).centroid
+            county = news.counties.lookup(c.y, c.x)
+            name = usda_ams.STATE_FULL.get(county["state"]) if county else None
+            if name and name not in states:
+                states.append(name)
+    print(f"States: {', '.join(states) or '(none: pass --state Iowa)'}")
+    reports = usda_ams.list_reports(key)
+    print(f"USDA reports available: {len(reports)}")
+    picks = usda_ams.grain_bid_reports(reports, states)
+    for r in picks:
+        print(f"  match: {r['id']}  {r['title']}")
+    if not picks:
+        sys.exit("No grain bid report titles matched. Search the list with --search, then set FIELD_MONITOR_AMS_REPORTS.")
+    rows = usda_ams.fetch_report(key, picks[0]["id"])
+    print(f"Report {picks[0]['id']}: {len(rows)} rows; first row fields: {sorted(rows[0]) if rows else '-'}")
+    if rows:
+        print(f"  first row: { {k: rows[0][k] for k in list(rows[0])[:12]} }")
+    med = usda_ams.daily_medians(rows)
+    for (day, crop), (price, n) in sorted(med.items())[-6:]:
+        print(f"  {day}  {crop:9s} ${price:.2f}/bu  (median of {n})")
+    if not med:
+        print("  Parsed no prices: paste this output to your developer so the parser can be adjusted.")
+
+
 def _cmd_fields(_: argparse.Namespace) -> None:
     for f in Store.from_env().list_fields(include_archived=True):
         flag = " [archived]" if f.get("archived") else ""
@@ -132,6 +172,10 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("csv")
     s.add_argument("--source", required=True)
     s.set_defaults(fn=_cmd_import_prices)
+
+    s = sub.add_parser("usda-check", help="test the USDA cash bid connection (needs USDA_AMS_API_KEY)")
+    s.add_argument("--state", action="append", help="state name, e.g. Iowa (default: states of your fields)")
+    s.set_defaults(fn=_cmd_usda_check)
 
     s = sub.add_parser("fields", help="list fields")
     s.set_defaults(fn=_cmd_fields)

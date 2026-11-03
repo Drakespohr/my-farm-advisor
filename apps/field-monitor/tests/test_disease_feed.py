@@ -120,7 +120,8 @@ def test_reports_posts_feed_and_watch(app, store):
     a.post("/api/posts", json={"body": "Anyone seeing rust south of Chariton?", "field_id": fa})
     feed = a.get("/api/feed").json()
     types = {i["type"] for i in feed}
-    assert {"report", "post", "field", "roundup"} <= types
+    assert {"report", "post", "roundup"} <= types and "field" not in types  # "all" is the shared view
+    assert any(i["type"] == "field" for i in a.get("/api/feed?section=fields").json())
     rep_item = next(i for i in feed if i["type"] == "report" and "rust" in (i["title"] or "").lower())
     assert rep_item["title"] == "Southern rust spotted in Lucas County, IA"
     near = a.get("/api/feed?section=local").json()
@@ -132,5 +133,8 @@ def test_reports_posts_feed_and_watch(app, store):
     assert a.post(f"/api/posts/{pid}/helpful").json() == {"helpful": 0, "mine": False}
     cm = a.post(f"/api/posts/{pid}/comments", json={"body": "Seeing it here too"}).json()
     assert cm[0]["author"] == "Ann"
-    assert any(i["type"] == "field" and "pressure" in i["title"] for i in feed)
+    assert any(i["type"] == "field" and "pressure" in i["title"] for i in a.get("/api/feed?section=fields").json())
+    # Everyone sees the same "all" view (apart from their own Helpful marks).
+    strip = lambda items: [(i["type"], i["id"]) for i in items if i["type"] != "roundup"]  # noqa: E731
+    assert strip(a.get("/api/feed").json()) == strip(far.get("/api/feed").json())
     assert far.get(f"/api/fields/{fa}/watch").status_code == 404

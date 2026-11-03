@@ -325,7 +325,7 @@
     }
     const dir = c.change > 0 ? "up" : c.change < 0 ? "down" : "flat";
     const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "■";
-    const label = c.kind === "futures" ? `Futures${c.contract ? " " + c.contract : ""}` : "Cash bid";
+    const label = c.kind === "futures" ? `Futures${c.contract ? " " + c.contract : ""}` : `Cash bid${c.contract ? ` (${c.contract})` : ""}`;
     return el("div", { class: `pcard ${dir}`, title: `${c.name}: ${money(c.price)}/${c.unit} · ${label} · ${c.source} · ${c.as_of}` },
       el("div", { class: "row space" }, el("span", { class: "pname", text: c.name }), sparkline(c.history)),
       el("div", { class: "pprice" }, money(c.price), el("span", { class: "punit", text: `/${c.unit}` })),
