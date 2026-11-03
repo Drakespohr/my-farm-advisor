@@ -25,7 +25,7 @@ import datetime as dt
 import json
 import os
 import re
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union, get_args
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -280,8 +280,10 @@ class Scouting(BaseModel):
 
 class SoilTest(BaseModel):
     kind: Literal["soil_test"]
+    # Field-level date the cores were pulled (occurred_at may be when results came back).
+    sampled_on: dt.date
     lab: Optional[str] = Field(default=None, max_length=120)
-    depth_in: float = Field(default=6, gt=0, le=60)
+    depth_in: float = Field(default=6, gt=0, le=60, description="Sampling depth, inches (bottom of the core)")
     ph: Optional[float] = Field(default=None, ge=0, le=14)
     organic_matter_pct: Optional[float] = Field(default=None, ge=0, le=100)
     phosphorus_ppm: Optional[float] = Field(default=None, ge=0)
@@ -290,6 +292,47 @@ class SoilTest(BaseModel):
     sulfur_ppm: Optional[float] = Field(default=None, ge=0)
     zinc_ppm: Optional[float] = Field(default=None, ge=0)
 
+    @field_validator("sampled_on")
+    @classmethod
+    def not_in_future(cls, value: dt.date) -> dt.date:
+        if value > _utcnow().date() + dt.timedelta(days=1):
+            raise ValueError("sampled_on is in the future")
+        return value
+
+
+class IrrigationWaterSample(BaseModel):
+    """Nitrate test of irrigation water (for N credits in NUE and NRD reporting)."""
+    kind: Literal["irrigation_water_sample"]
+    nitrate_n_ppm: float = Field(ge=0, le=500, description="Nitrate-N, ppm (mg/L)")
+    source: Optional[str] = Field(default=None, max_length=120, description="Well name, canal, etc.")
+    well_registration: Optional[str] = Field(default=None, max_length=40, description="State well registration number, if a well")
+    lab: Optional[str] = Field(default=None, max_length=120)
+    notes: Optional[str] = None
+
+
+class ManureSample(BaseModel):
+    """Manure nutrient analysis. Solid results are lb per ton; liquid are lb per 1,000 gal."""
+    kind: Literal["manure_sample"]
+    animal: Literal["swine", "beef", "dairy", "poultry", "other"]
+    form: Literal["solid", "liquid"]
+    unit: Literal["lb_per_ton", "lb_per_1000_gal"]
+    total_n: float = Field(ge=0, le=1000)
+    ammonium_n: Optional[float] = Field(default=None, ge=0, le=1000)
+    p2o5: Optional[float] = Field(default=None, ge=0, le=1000)
+    k2o: Optional[float] = Field(default=None, ge=0, le=1000)
+    dry_matter_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    source: Optional[str] = Field(default=None, max_length=120, description="Barn, lagoon, pile, etc.")
+    lab: Optional[str] = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def unit_matches_form(self):
+        expected = "lb_per_ton" if self.form == "solid" else "lb_per_1000_gal"
+        if self.unit != expected:
+            raise ValueError(f"{self.form} manure results use {expected}")
+        if self.ammonium_n is not None and self.ammonium_n > self.total_n:
+            raise ValueError("ammonium_n can't exceed total_n")
+        return self
+
 
 class Harvest(BaseModel):
     kind: Literal["harvest"]
@@ -297,13 +340,22 @@ class Harvest(BaseModel):
     moisture_pct: Optional[float] = Field(default=None, ge=0, le=100)
 
 
+PAYLOAD_MODELS = (
+    Planting, StandCount, GrowthStage, Irrigation, Rainfall, SoilMoisture,
+    Fertilizer, FoliarApplication, Scouting, SoilTest, Harvest,
+    IrrigationWaterSample, ManureSample,
+)
+
 EventPayload = Annotated[
     Union[
         Planting, StandCount, GrowthStage, Irrigation, Rainfall, SoilMoisture,
         Fertilizer, FoliarApplication, Scouting, SoilTest, Harvest,
+        IrrigationWaterSample, ManureSample,
     ],
     Field(discriminator="kind"),
 ]
+
+EVENT_KINDS: tuple[str, ...] = tuple(get_args(m.model_fields["kind"].annotation)[0] for m in PAYLOAD_MODELS)
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +463,10 @@ def deadline_info(row: "EventRow") -> dict[str, Any]:
 # Diagnosis context
 # ---------------------------------------------------------------------------
 
+_CONTEXT_SOIL_KEYS = ("lab", "depth_in", "ph", "organic_matter_pct", "phosphorus_ppm", "potassium_ppm",
+                      "nitrate_n_ppm", "sulfur_ppm", "zinc_ppm")
+
+
 def build_context(season: SeasonRow, rows: list[EventRow], as_of: dt.datetime) -> dict[str, Any]:
     """Summarize a season's logged inputs as of a date, for diagnosis."""
     recent_cutoff = as_of - dt.timedelta(days=14)
@@ -461,7 +517,8 @@ def build_context(season: SeasonRow, rows: list[EventRow], as_of: dt.datetime) -
         elif row.kind == "stand_count":
             stand = {"plants_per_ac": p["plants_per_ac"], "days_ago": days_ago}
         elif row.kind == "soil_test":
-            soil_test = {k: v for k, v in p.items() if k != "kind" and v is not None}
+            # Original keys only, so the context shape doesn't change as SoilTest grows.
+            soil_test = {k: v for k, v in p.items() if k in _CONTEXT_SOIL_KEYS and v is not None}
             soil_test["days_ago"] = days_ago
 
     days_since_planting = (as_of.date() - season.planting_date).days if season.planting_date else None
@@ -783,8 +840,7 @@ def nrd_check(season_id: int, nrd: Optional[str] = Query(default=None, descripti
 
 # ---- drafts ----------------------------------------------------------------------------
 
-FORM_TYPES = ("planting", "stand_count", "growth_stage", "irrigation", "rainfall", "soil_moisture",
-              "fertilizer", "foliar", "scouting", "soil_test", "harvest")
+FORM_TYPES = EVENT_KINDS
 MAX_DRAFT_BYTES = 64_000
 
 

@@ -67,7 +67,7 @@ GOLDEN = {
 
 def test_diagnosis_context_golden(client):
     sid = setup_season(client)
-    ev(client, sid, "2026-04-01T12:00:00", {"kind": "soil_test", "ph": 6.4, "nitrate_n_ppm": 12})
+    ev(client, sid, "2026-04-01T12:00:00", {"kind": "soil_test", "sampled_on": "2026-03-28", "ph": 6.4, "nitrate_n_ppm": 12})
     ev(client, sid, "2026-04-15T12:00:00", {"kind": "fertilizer", "product": "Anhydrous ammonia", "method": "pre_plant", "rate_lb_per_ac": 180, "n_pct": 82})
     ev(client, sid, "2026-05-31T12:00:00", {"kind": "stand_count", "plants_per_ac": 33000})
     ev(client, sid, "2026-06-30T12:00:00", {"kind": "fertilizer", "product": "UAN 32%", "method": "side_dress", "rate_lb_per_ac": 100, "n_pct": 32})
