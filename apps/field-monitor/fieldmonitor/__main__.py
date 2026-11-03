@@ -23,7 +23,17 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 
 
 def _cmd_import(args: argparse.Namespace) -> None:
+    from .accounts import Accounts
+
     store = Store.from_env()
+    accounts = Accounts(store.root / "app.db")
+    owner = None
+    if args.owner:
+        owner = accounts.get_user_by_email(args.owner)
+        if not owner:
+            sys.exit(f"No account for {args.owner}. Sign up in the app first.")
+    elif accounts.user_count():
+        sys.exit("Accounts exist: pass --owner EMAIL so the imported fields belong to someone.")
     data = json.loads(Path(args.geojson).read_text())
     feats = data["features"] if data.get("type") == "FeatureCollection" else [data]
     for n, feat in enumerate(feats, start=1):
@@ -34,6 +44,12 @@ def _cmd_import(args: argparse.Namespace) -> None:
         rec, created = store.create_field(
             geom, str(name), field_id=str(fid) if fid else None, crop=props.get("crop"), source=f"cli:{args.geojson}"
         )
+        if owner:
+            current = accounts.owner_of(rec["id"])
+            if current and current != owner["id"]:
+                print(f"skipped  {rec['id']}: owned by another account", file=sys.stderr)
+                continue
+            accounts.grant(rec["id"], owner["id"], "owner")
         print(f"{'created ' if created else 'exists  '} {rec['id']}  {rec['area_ac']:.1f} ac  {rec['name']}")
 
 
@@ -76,6 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("geojson")
     s.add_argument("--name-property", default="name")
     s.add_argument("--id-property", default=None)
+    s.add_argument("--owner", default=None, help="email of the account that owns the imported fields")
     s.set_defaults(fn=_cmd_import)
 
     s = sub.add_parser("process", help="fetch and process imagery for a field (or 'all')")

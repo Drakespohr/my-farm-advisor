@@ -16,6 +16,46 @@ points, management zones, and before/after change maps.
   append-only `lineage.jsonl`. Every result records its scene, asset URLs, processing
   version, and git commit.
 
+## Accounts, sharing, and the marketplace
+
+The monitoring is the backbone of a small ag-business network:
+
+- **Accounts:** email + password (scrypt-hashed), or **Continue with Google** when
+  `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are set (redirect URI:
+  `<FIELD_MONITOR_PUBLIC_URL>/api/auth/google/callback`). Members pick roles: farmer/grower,
+  agronomist/consultant, service provider, input & equipment dealer, crop buyer.
+- **Private fields:** every field belongs to the account that created it and is invisible to
+  everyone else. Owners can **Share** a field (view-only) with another account by email, e.g.
+  their agronomist, and can opt in to show a field's **score** (never the map) on their profile.
+  The first account created claims fields that existed before accounts.
+- **Marketplace:** post services offered, products or crops for sale, or "wanted" requests;
+  browse and filter by type, category, or keyword; message the poster in-app. No payments in
+  this version.
+- **Profiles:** business name, roles, location, bio, website/phone, active listings, and
+  showcased field scores. Listings and profiles can be reported.
+
+Security: HttpOnly SameSite=Lax session cookie (hashed at rest, 30 days), a required
+`X-Requested-With` header on every write as CSRF protection, login rate limiting, and access
+checks on every field endpoint (unknown and forbidden fields both return 404). In production,
+run behind HTTPS (set `FIELD_MONITOR_COOKIE_SECURE=1` if TLS ends at a proxy) and back up
+`$FIELD_MONITOR_DATA/app.db` along with the field data.
+
+## Field score
+
+A 0–100 score in the field header (and on the field list) answers "how is this field doing
+compared with the farmland around it?":
+
+| Part | Weight | Measure |
+|---|---|---|
+| Vigor vs. area | 60% | The field's NDVI as a percentile of NDVI across **cropland within 2 km** (ESA WorldCover 2021 cropland class), latest 3 good in-season images |
+| Evenness | 25% | Within-field variability (CV ≤ 0.05 → 100, ≥ 0.25 → 0) |
+| Keeping pace | 15% | Field NDVI change minus the area's change over the last 2–6 weeks |
+
+Labels: 80+ Excellent, 65+ Good, 50+ Fair, below 50 Needs attention. Only QA-"ok" images count.
+The season ends when nearby cropland falls below 75% of its own peak, after which the score
+freezes ("Season over") so harvest doesn't read as failure. On the 2025 test field it ran 31
+(mid-June, behind its neighbors) → 68 (mid-July) → 85 (mid-August) → 78 at season end.
+
 ## Quick start
 
 ```bash
@@ -57,14 +97,16 @@ Only the field's own pixels are read from the cloud-optimized GeoTIFFs, not whol
 
 Data is written to `./data` by default. Set `FIELD_MONITOR_DATA=/path` to change it.
 Set `FIELD_MONITOR_REFRESH_HOURS` to change how often fields are checked for new passes
-(default `12`; `0` turns automatic updates off).
+(default `12`; `0` turns automatic updates off). Other settings: `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, `FIELD_MONITOR_PUBLIC_URL` (for the Google redirect), and
+`FIELD_MONITOR_COOKIE_SECURE=1`.
 In Docker deployments, point it at persistent storage (for example `/data/field-monitor`).
 
 ### Command line (for scheduled jobs and the Data Pipeline agent)
 
 ```bash
 fieldmonitor fields                                         # list fields
-fieldmonitor import boundaries.geojson --id-property FIELD_ID --name-property NAME
+fieldmonitor import boundaries.geojson --owner you@example.com --id-property FIELD_ID --name-property NAME
 fieldmonitor process all --start 2026-04-01 --end 2026-11-01   # idempotent; safe to re-run daily
 ```
 
@@ -235,12 +277,14 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 63 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 77 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel
 comparison, pending/confirmed/recovered, field vs. regional scope, stale-version reprocessing,
-hotspot cause rules for water, strips, nitrogen, dry spots, persistent vs. new, edges, stand). No network is needed.
+hotspot cause rules for water, strips, nitrogen, dry spots, persistent vs. new, edges, stand,
+accounts/login/CSRF, private fields and view-only sharing, listings, messages, unread counts,
+profile showcase, and the field score incl. season end). No network is needed.
 
 ## Limitations and next steps
 

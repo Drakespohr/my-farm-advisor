@@ -30,7 +30,15 @@ def add_obs(store, field_id, date, arr, qa=None, valid=None, clear_fraction=1.0)
 def client(store, monkeypatch):
     # No network in tests: syncs started by field creation find no scenes.
     monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda *a, **k: ([], "test"))
-    return TestClient(create_app(store, refresh_hours=0)), store
+    c = TestClient(create_app(store, refresh_hours=0), headers={"X-Requested-With": "fieldmonitor"})
+    signup(c, "owner@example.com", "Olive Owner")
+    return c, store
+
+
+def signup(c, email, name, roles=("farmer",)):
+    r = c.post("/api/auth/register", json={"email": email, "password": "correct horse 1", "name": name, "roles": list(roles)})
+    assert r.status_code == 201, r.text
+    return r.json()["user"]["id"]
 
 
 def test_create_and_list_fields(client):

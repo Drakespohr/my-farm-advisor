@@ -4,6 +4,7 @@ __version__ = "0.1.0"
 
 # Bump whenever index math, masking, or resampling changes. Observations are stored
 # under their processing version so old results are never overwritten.
-PROCESSING_VERSION = "2"
+PROCESSING_VERSION = "3"
 # v2: adds per-date haze QA (aerosol optical thickness + blue reflectance) and neighbor-ring
 #     statistics outside the field; context window widened to 160 m. Index math unchanged.
+# v3: adds the area baseline (NDVI of WorldCover cropland within 2 km) used by the field score.

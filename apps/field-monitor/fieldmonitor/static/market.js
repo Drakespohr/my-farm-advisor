@@ -1,0 +1,331 @@
+/* Accounts, marketplace, messages, and profiles. User-provided text is always set with textContent. */
+(() => {
+  "use strict";
+  const FM = window.FM;
+  const { el, api } = FM;
+  const $ = (id) => document.getElementById(id);
+  let meta = null; // listing kinds, categories, role labels
+  let authCfg = null;
+
+  const initials = (name) => (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+  const when = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const days = (Date.now() - d) / 864e5;
+    return days < 1 ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : days < 7 ? `${Math.floor(days)} d ago` : d.toLocaleDateString();
+  };
+  async function getMeta() { return meta || (meta = await api("/api/market/meta")); }
+  const avatar = (name, cls = "") => el("span", { class: `avatar ${cls}`, text: initials(name), "aria-hidden": "true" });
+  const chip = (text, cls = "") => el("span", { class: `chip ${cls}`, text });
+  const page = (id) => { const p = $(id); p.replaceChildren(); return p; };
+  const field = (label, input) => el("label", {}, label, input);
+
+  // ---------- session -----------------------------------------------------------
+  FM.setMe = (me) => {
+    FM.state.me = me;
+    if (!me) return;
+    $("avatar").textContent = initials(me.profile.display_name);
+    const b = $("unread-badge");
+    b.hidden = !me.unread;
+    b.textContent = me.unread > 9 ? "9+" : String(me.unread || "");
+  };
+  setInterval(async () => {
+    if (!FM.state.me || document.hidden) return;
+    try { FM.setMe(await api("/api/me")); } catch (_) { /* logged out or offline */ }
+  }, 60000);
+
+  // ---------- auth --------------------------------------------------------------
+  let authRender = 0;
+  FM.views.auth = async () => {
+    const mine = ++authRender;
+    authCfg = authCfg || (await api("/api/auth/config"));
+    if (mine !== authRender) return; // a newer render started while we waited
+    const p = page("view-auth");
+    const err = new URLSearchParams(location.hash.split("?")[1] || "").get("error");
+    const msg = el("p", { class: "small err", role: "alert", text: err ? "Google sign-in didn't work. Try again or use email." : "" });
+    let mode = "login";
+    const card = el("div", { class: "auth-card card" });
+    const render = () => {
+      card.replaceChildren();
+      card.append(el("h1", { text: "Field Monitor" }), el("p", { class: "muted", text: "Satellite field monitoring and a marketplace for ag businesses." }));
+      card.append(el("div", { class: "seg" },
+        el("button", { type: "button", class: mode === "login" ? "on" : "", text: "Log in", onclick: () => { mode = "login"; render(); } }),
+        el("button", { type: "button", class: mode === "signup" ? "on" : "", text: "Sign up", onclick: () => { mode = "signup"; render(); } })));
+      const email = el("input", { type: "email", required: "", autocomplete: "email", maxlength: "320" });
+      const pw = el("input", { type: "password", required: "", minlength: mode === "signup" ? "10" : "1", autocomplete: mode === "signup" ? "new-password" : "current-password", maxlength: "200" });
+      const form = el("form", { class: "stack" });
+      let name = null;
+      const roleBoxes = [];
+      if (mode === "signup") {
+        name = el("input", { type: "text", required: "", maxlength: "80", autocomplete: "name" });
+        form.append(field("Your name", name));
+      }
+      form.append(field("Email", email), field(mode === "signup" ? "Password (10+ characters)" : "Password", pw));
+      if (mode === "signup") {
+        const roles = el("fieldset", { class: "roles" }, el("legend", { text: "I am a… (pick any)" }));
+        for (const [key, label] of Object.entries(authCfg.roles)) {
+          const cb = el("input", { type: "checkbox", value: key });
+          if (key === "farmer") cb.checked = true;
+          roleBoxes.push(cb);
+          roles.append(el("label", { class: "check" }, cb, label));
+        }
+        form.append(roles);
+      }
+      form.append(el("button", { class: "btn primary block", type: "submit", text: mode === "signup" ? "Create account" : "Log in" }), msg);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        msg.textContent = "";
+        try {
+          const body = mode === "signup"
+            ? { name: name.value, email: email.value, password: pw.value, roles: roleBoxes.filter((c) => c.checked).map((c) => c.value) }
+            : { email: email.value, password: pw.value };
+          const me = await api(mode === "signup" ? "/api/auth/register" : "/api/auth/login", { method: "POST", body: JSON.stringify(body) });
+          FM.setMe(me);
+          location.hash = "#/fields";
+        } catch (ex) { msg.textContent = ex.message; }
+      });
+      card.append(form);
+      if (authCfg.google) {
+        card.append(el("div", { class: "or", text: "or" }), el("a", { class: "btn block google", href: "/api/auth/google/start", text: "Continue with Google" }));
+      }
+    };
+    render();
+    p.append(card);
+  };
+
+  // ---------- marketplace -------------------------------------------------------
+  function listingCard(l) {
+    return el("a", { class: "lcard card", href: `#/market/${encodeURIComponent(l.id)}` },
+      el("div", { class: "row space" }, chip(l.kind_label, `k-${l.kind}`), el("span", { class: "muted small", text: when(l.created) })),
+      el("h3", { text: l.title }),
+      el("div", { class: "lmeta" }, l.price ? el("b", { text: l.price }) : null, l.location ? el("span", { class: "muted", text: `📍 ${l.location}` }) : null),
+      el("p", { class: "ldesc", text: l.description }),
+      el("div", { class: "seller small" }, avatar(l.seller_name, "sm"), el("span", { text: l.seller_business || l.seller_name }), el("span", { class: "muted", text: ` · ${l.category}` })));
+  }
+
+  FM.views.market = async (arg) => {
+    const m = await getMeta();
+    if (arg === "new") return newListing(m);
+    if (arg) return listingDetail(arg, m);
+    const p = page("view-market");
+    const q = el("input", { type: "search", placeholder: "Search listings (e.g. drone spraying, seed corn)", maxlength: "80" });
+    const kind = el("select", {}, el("option", { value: "", text: "All types" }), ...Object.entries(m.kinds).map(([k, v]) => el("option", { value: k, text: v })));
+    const cat = el("select", {}, el("option", { value: "", text: "All categories" }), ...m.categories.map((c) => el("option", { value: c, text: c })));
+    const mine = el("input", { type: "checkbox" });
+    const grid = el("div", { class: "lgrid" });
+    const load = async () => {
+      const qs = new URLSearchParams();
+      if (q.value.trim()) qs.set("q", q.value.trim());
+      if (kind.value) qs.set("kind", kind.value);
+      if (cat.value) qs.set("category", cat.value);
+      if (mine.checked) qs.set("mine", "true");
+      const items = await api(`/api/listings?${qs}`);
+      grid.replaceChildren(...(items.length ? items.map(listingCard)
+        : [el("p", { class: "muted", text: "No listings match. Be the first to post one." })]));
+    };
+    let t;
+    q.addEventListener("input", () => { clearTimeout(t); t = setTimeout(load, 300); });
+    [kind, cat, mine].forEach((x) => x.addEventListener("change", load));
+    p.append(
+      el("div", { class: "page-head" }, el("h1", { text: "Marketplace" }), el("a", { class: "btn primary", href: "#/market/new", text: "＋ Post a listing" })),
+      el("p", { class: "muted", text: "Services, inputs, equipment, and crops from farms and ag businesses." }),
+      el("div", { class: "filters row gap wrap" }, el("div", { class: "grow" }, q), kind, cat, el("label", { class: "check small" }, mine, "My listings")),
+      grid);
+    load();
+  };
+
+  async function newListing(m) {
+    const p = page("view-market");
+    const kind = el("select", { required: "" }, ...Object.entries(m.kinds).map(([k, v]) => el("option", { value: k, text: v })));
+    const cat = el("select", { required: "" }, ...m.categories.map((c) => el("option", { value: c, text: c })));
+    const title = el("input", { type: "text", required: "", minlength: "3", maxlength: "120", placeholder: "e.g. Drone spraying, 300 ac/day" });
+    const desc = el("textarea", { required: "", minlength: "3", maxlength: "4000", rows: "5", placeholder: "What you offer or need, timing, coverage area, how to book" });
+    const price = el("input", { type: "text", maxlength: "80", placeholder: "e.g. $12/ac, $4.10/bu, call for quote" });
+    const loc = el("input", { type: "text", maxlength: "120", placeholder: "e.g. Story County, IA", value: (FM.state.me.profile.location || "") });
+    const msg = el("p", { class: "small err", role: "alert" });
+    const form = el("form", { class: "stack card narrow" },
+      el("div", { class: "row gap wrap" }, field("Type", kind), field("Category", cat)),
+      field("Title", title), field("Details", desc),
+      el("div", { class: "row gap wrap" }, field("Price (optional)", price), field("Location", loc)),
+      el("div", { class: "row gap" }, el("button", { class: "btn primary", type: "submit", text: "Post listing" }), el("a", { class: "btn ghost", href: "#/market", text: "Cancel" })),
+      msg);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const l = await api("/api/listings", { method: "POST", body: JSON.stringify({ kind: kind.value, category: cat.value, title: title.value, description: desc.value, price: price.value || null, location: loc.value || null }) });
+        location.hash = `#/market/${l.id}`;
+      } catch (ex) { msg.textContent = ex.message; }
+    });
+    p.append(el("div", { class: "page-head" }, el("h1", { text: "Post a listing" })), form);
+  }
+
+  async function listingDetail(id) {
+    const p = page("view-market");
+    let l;
+    try { l = await api(`/api/listings/${encodeURIComponent(id)}`); }
+    catch (ex) { p.append(el("p", { text: ex.message }), el("a", { href: "#/market", text: "← Back to marketplace" })); return; }
+    const side = el("div", { class: "card stack" },
+      el("a", { class: "seller", href: `#/u/${encodeURIComponent(l.user_id)}` }, avatar(l.seller_name), el("div", {}, el("b", { text: l.seller_business || l.seller_name }), el("div", { class: "muted small", text: l.seller_business ? l.seller_name : "View profile" }))));
+    if (l.is_mine) {
+      side.append(el("button", { class: "btn", type: "button", text: l.status === "active" ? "Mark as closed" : "Reopen listing", onclick: async () => {
+        await api(`/api/listings/${l.id}`, { method: "PATCH", body: JSON.stringify({ status: l.status === "active" ? "closed" : "active" }) });
+        listingDetail(id);
+      } }));
+    } else {
+      const body = el("textarea", { rows: "4", maxlength: "4000", required: "", placeholder: "Hi, is this still available?" });
+      const out = el("p", { class: "small", role: "status" });
+      const form = el("form", { class: "stack" }, field(`Message ${l.seller_name}`, body), el("button", { class: "btn primary", type: "submit", text: "Send message" }), out);
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try {
+          const c = await api("/api/conversations", { method: "POST", body: JSON.stringify({ to_user_id: l.user_id, listing_id: l.id, body: body.value }) });
+          location.hash = `#/messages/${c.id}`;
+        } catch (ex) { out.textContent = ex.message; }
+      });
+      side.append(form, el("button", { type: "button", class: "linkbtn small", text: "Report this listing", onclick: () => report("listing", l.id) }));
+    }
+    p.append(
+      el("a", { href: "#/market", class: "small", text: "← Marketplace" }),
+      el("div", { class: "detail-grid" },
+        el("div", { class: "card stack" },
+          el("div", { class: "row gap wrap" }, chip(l.kind_label, `k-${l.kind}`), chip(l.category), l.status !== "active" ? chip("Closed", "closed") : null),
+          el("h1", { text: l.title }),
+          el("div", { class: "lmeta" }, l.price ? el("b", { text: l.price }) : null, l.location ? el("span", { class: "muted", text: `📍 ${l.location}` }) : null, el("span", { class: "muted", text: `Posted ${when(l.created)}` })),
+          el("p", { class: "prewrap", text: l.description })),
+        side));
+  }
+
+  async function report(kind, id) {
+    const reason = prompt("What's wrong with it? (spam, scam, offensive…)");
+    if (!reason || reason.trim().length < 3) return;
+    await api("/api/reports", { method: "POST", body: JSON.stringify({ kind, target_id: id, reason }) });
+    alert("Thanks. We'll review it.");
+  }
+
+  // ---------- messages ----------------------------------------------------------
+  let threadTimer = null;
+  FM.views.messages = async (convId) => {
+    clearInterval(threadTimer);
+    const p = page("view-messages");
+    const list = el("div", { class: "convlist" });
+    const thread = el("div", { class: "thread card" });
+    p.append(el("div", { class: "page-head" }, el("h1", { text: "Messages" })), el("div", { class: `inbox ${convId ? "has-thread" : ""}` }, list, thread));
+    const convs = await api("/api/conversations");
+    if (!convs.length) list.append(el("p", { class: "muted", text: "No messages yet. Contact someone from the Marketplace." }));
+    for (const c of convs) {
+      list.append(el("a", { class: `conv ${c.id === convId ? "active" : ""}`, href: `#/messages/${c.id}` },
+        avatar(c.other_name, "sm"),
+        el("div", { class: "grow" },
+          el("div", { class: "row space" }, el("b", { text: c.other_business || c.other_name }), c.unread && c.id !== convId ? el("span", { class: "badge", text: String(c.unread) }) : null),
+          c.listing_title ? el("div", { class: "small muted", text: `Re: ${c.listing_title}` }) : null,
+          el("div", { class: "small snippet", text: c.last_body || "" }))));
+    }
+    if (!convId) { thread.append(el("p", { class: "muted", text: "Pick a conversation." })); return; }
+    const draw = async () => {
+      const t = await api(`/api/conversations/${encodeURIComponent(convId)}/messages`);
+      thread.replaceChildren(
+        el("div", { class: "thread-head" },
+          el("a", { href: "#/messages", class: "only-mobile small", text: "← All" }),
+          el("a", { href: `#/u/${encodeURIComponent(t.other.id)}` }, el("b", { text: t.other.business || t.other.name })),
+          t.listing ? el("a", { class: "small muted", href: `#/market/${t.listing.id}`, text: `Re: ${t.listing.title}` }) : null),
+        el("div", { class: "bubbles" }, ...t.messages.map((m) => el("div", { class: `bubble ${m.sender_id === t.me ? "mine" : ""}` },
+          el("div", { class: "prewrap", text: m.body }), el("div", { class: "time", text: when(m.created) })))),
+        compose());
+      const b = thread.querySelector(".bubbles");
+      b.scrollTop = b.scrollHeight;
+      FM.setMe(await api("/api/me"));
+    };
+    const compose = () => {
+      const ta = el("textarea", { rows: "2", maxlength: "4000", required: "", placeholder: "Write a message" });
+      const f = el("form", { class: "compose" }, ta, el("button", { class: "btn primary", type: "submit", text: "Send" }));
+      f.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (!ta.value.trim()) return;
+        await api(`/api/conversations/${encodeURIComponent(convId)}/messages`, { method: "POST", body: JSON.stringify({ body: ta.value }) });
+        draw();
+      });
+      ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) f.requestSubmit(); });
+      return f;
+    };
+    await draw();
+    threadTimer = setInterval(() => { if (location.hash === `#/messages/${convId}` && !document.hidden && !thread.querySelector("textarea").value) draw(); }, 10000);
+  };
+
+  // ---------- profiles ----------------------------------------------------------
+  FM.views.profile = async (userId, editing) => {
+    const p = page("view-profile");
+    const m = await getMeta();
+    const data = await api(`/api/users/${encodeURIComponent(userId)}`);
+    const pr = data.profile;
+    const head = el("div", { class: "card profile-head" },
+      avatar(pr.display_name, "lg"),
+      el("div", { class: "grow" },
+        el("h1", { text: pr.business_name || pr.display_name }),
+        pr.business_name ? el("div", { class: "muted", text: pr.display_name }) : null,
+        el("div", { class: "row gap wrap" }, ...pr.role_labels.map((r) => chip(r))),
+        pr.location ? el("div", { class: "muted small", text: `📍 ${pr.location}` }) : null),
+      data.is_me ? el("a", { class: "btn ghost", href: "#/me", text: "Edit profile" })
+        : el("button", { class: "btn primary", type: "button", text: "Message", onclick: async () => {
+          const text = prompt(`Message ${pr.display_name}`);
+          if (!text) return;
+          const c = await api("/api/conversations", { method: "POST", body: JSON.stringify({ to_user_id: pr.id, body: text }) });
+          location.hash = `#/messages/${c.id}`;
+        } }));
+    p.append(head);
+    if (pr.bio || pr.website || pr.phone) {
+      p.append(el("div", { class: "card stack" },
+        pr.bio ? el("p", { class: "prewrap", text: pr.bio }) : null,
+        el("div", { class: "row gap wrap small" },
+          pr.website ? el("a", { href: pr.website, target: "_blank", rel: "noopener nofollow ugc", text: pr.website.replace(/^https?:\/\//, "") }) : null,
+          pr.phone ? el("a", { href: `tel:${pr.phone.replace(/[^\d+]/g, "")}`, text: pr.phone }) : null)));
+    }
+    if (data.showcase.length) {
+      p.append(el("h2", { text: "Fields" }), el("div", { class: "lgrid" }, ...data.showcase.map((f) => el("div", { class: "card fcard" },
+        el("div", { class: "row space" }, el("b", { text: f.name }), f.score != null ? el("span", { class: `score-pill ${FM.scoreClass(f.score)}`, text: String(f.score) }) : null),
+        el("div", { class: "muted small", text: `${FM.fmt(f.area_ac, 0)} ac${f.crop ? " · " + f.crop : ""}${f.label ? " · " + f.label : ""}${f.as_of ? " · " + f.as_of : ""}` })))));
+    }
+    p.append(el("h2", { text: data.is_me ? "My listings" : "Listings" }),
+      data.listings.length ? el("div", { class: "lgrid" }, ...data.listings.map(listingCard)) : el("p", { class: "muted", text: "No active listings." }));
+    if (!data.is_me) p.append(el("button", { type: "button", class: "linkbtn small", text: "Report this profile", onclick: () => report("user", pr.id) }));
+    if (editing) p.prepend(editProfile(pr, m));
+  };
+
+  function editProfile(pr, m) {
+    const inp = (k, attrs = {}) => el("input", { type: "text", value: pr[k] || "", ...attrs });
+    const f = {
+      display_name: inp("display_name", { required: "", maxlength: "80" }),
+      business_name: inp("business_name", { maxlength: "120", placeholder: "Farm or company name" }),
+      location: inp("location", { maxlength: "120", placeholder: "County, State" }),
+      website: inp("website", { maxlength: "200", placeholder: "example.com" }),
+      phone: inp("phone", { maxlength: "40", placeholder: "Shown on your profile" }),
+      bio: el("textarea", { rows: "4", maxlength: "2000", placeholder: "What you grow or offer, acres, service area, certifications" }),
+    };
+    f.bio.value = pr.bio || "";
+    const roles = Object.entries(m.roles).map(([k, v]) => {
+      const cb = el("input", { type: "checkbox", value: k });
+      cb.checked = pr.roles.includes(k);
+      return { cb, label: el("label", { class: "check" }, cb, v) };
+    });
+    const msg = el("p", { class: "small", role: "status" });
+    const form = el("form", { class: "card stack" },
+      el("h2", { text: "Edit profile" }),
+      el("div", { class: "row gap wrap" }, field("Name", f.display_name), field("Business", f.business_name)),
+      el("fieldset", { class: "roles" }, el("legend", { text: "Roles" }), ...roles.map((r) => r.label)),
+      el("div", { class: "row gap wrap" }, field("Location", f.location), field("Website", f.website), field("Phone", f.phone)),
+      field("About", f.bio),
+      el("div", { class: "row gap" }, el("button", { class: "btn primary", type: "submit", text: "Save" })), msg);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const body = Object.fromEntries(Object.entries(f).map(([k, x]) => [k, x.value]));
+        body.roles = roles.filter((r) => r.cb.checked).map((r) => r.cb.value);
+        const saved = await api("/api/me/profile", { method: "PATCH", body: JSON.stringify(body) });
+        FM.state.me.profile = saved;
+        FM.setMe(FM.state.me);
+        msg.textContent = "Saved.";
+        FM.views.profile(saved.id, true);
+      } catch (ex) { msg.textContent = ex.message; }
+    });
+    return form;
+  }
+})();
