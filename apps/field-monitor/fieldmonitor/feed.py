@@ -1,0 +1,371 @@
+"""Disease/pest reports, posts, comments, the news feed, and the per-field watch list.
+
+Reports and posts that carry a location store it rounded to 0.01 degrees (about 1 km), so
+sharing a report never reveals an exact field.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import threading
+import time
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from shapely.geometry import shape
+
+from . import disease, qa
+from .accounts import Accounts, new_id, now
+from .store import Store
+from .weather import WeatherStore, hourly, summary
+
+log = logging.getLogger(__name__)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS crop_reports (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, disease TEXT NOT NULL, crop TEXT, severity TEXT NOT NULL,
+  lat REAL NOT NULL, lon REAL NOT NULL, observed TEXT NOT NULL, notes TEXT, source TEXT NOT NULL DEFAULT 'community',
+  created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS crop_reports_obs ON crop_reports(observed);
+CREATE TABLE IF NOT EXISTS posts (
+  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, report_id TEXT,
+  lat REAL, lon REAL, created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS posts_created ON posts(created);
+CREATE TABLE IF NOT EXISTS comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, post_id TEXT NOT NULL, user_id TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS helpful (post_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (post_id, user_id));
+CREATE TABLE IF NOT EXISTS pressure_history (
+  field_id TEXT NOT NULL, day TEXT NOT NULL, score INTEGER, level TEXT, top TEXT, PRIMARY KEY (field_id, day)
+);
+"""
+NEAR_KM = 160  # "near me" = within ~100 miles of one of my fields
+EXTRA_DISEASES = {"other_disease": "Other disease", "insect": "Insect pest", "weed": "Weed escape", "hail": "Hail / storm damage"}
+
+
+def km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    return math.hypot((lat2 - lat1) * 111.0, (lon2 - lon1) * 111.0 * math.cos(math.radians((lat1 + lat2) / 2)))
+
+
+def rounded(v: float) -> float:
+    return round(v, 2)
+
+
+class ReportIn(BaseModel):
+    disease: str
+    severity: str = "moderate"
+    observed: date | None = None
+    notes: str | None = Field(None, max_length=1000)
+    field_id: str | None = None
+    lat: float | None = Field(None, ge=-90, le=90)
+    lon: float | None = Field(None, ge=-180, le=180)
+    share: bool = True
+
+
+class PostIn(BaseModel):
+    body: str = Field(min_length=1, max_length=3000)
+    field_id: str | None = None
+
+
+class CommentIn(BaseModel):
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class Watcher:
+    """Computes (and caches) disease pressure per field; records a daily history for the feed."""
+
+    def __init__(self, store: Store, accounts: Accounts, ws: WeatherStore) -> None:
+        self.store, self.accounts, self.ws = store, accounts, ws
+        self._cache: dict[tuple[str, str | None], tuple[float, dict[str, Any]]] = {}
+        self._lock = threading.Lock()
+
+    def centroid(self, field: dict[str, Any]) -> tuple[float, float]:
+        c = shape(field["geometry"]).centroid
+        return c.y, c.x
+
+    def reports_near(self, lat: float, lon: float, radius_km: float = 300, days: int = 21, as_of: date | None = None) -> list[dict[str, Any]]:
+        end = as_of or datetime.now(timezone.utc).date()
+        start = (end - timedelta(days=days)).isoformat()
+        dlat = radius_km / 111.0
+        with self.accounts.db() as c:
+            rows = c.execute(
+                "SELECT r.*, p.display_name AS author FROM crop_reports r LEFT JOIN profiles p ON p.user_id=r.user_id "
+                "WHERE r.observed>=? AND r.observed<=? AND r.lat BETWEEN ? AND ?",
+                (start, end.isoformat(), lat - dlat, lat + dlat)).fetchall()
+        return [dict(r) for r in rows if km(lat, lon, r["lat"], r["lon"]) <= radius_km]
+
+    def pressure(self, field_id: str, as_of: date | None = None, ttl: float = 1800) -> dict[str, Any]:
+        key = (field_id, as_of.isoformat() if as_of else None)
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        f = self.store.get_field(field_id)
+        lat, lon = self.centroid(f)
+        obs = [o for o in qa.classify(self.store.list_observations(field_id)) if o.get("qa_status") == "ok"]
+        if as_of:
+            obs = [o for o in obs if o["date"] <= as_of.isoformat()]
+        canopy = obs[-1]["stats"]["ndvi"]["median"] if obs else None
+        try:
+            hours, meta = hourly(lat, lon, self.ws, as_of=as_of, days=30)
+            weather_err = None
+        except Exception as exc:  # network down, no station nearby, archive gap
+            hours, meta, weather_err = [], {}, str(exc)[:200]
+        reports = self.reports_near(lat, lon, as_of=as_of)
+        result = disease.field_pressure(lat=lat, lon=lon, crop=f.get("crop"), hours=hours, reports=reports,
+                                        canopy_ndvi=canopy, as_of=as_of)
+        result.update(weather=summary(hours), weather_source=meta, weather_error=weather_err, canopy_ndvi=canopy)
+        if weather_err:
+            result["weather_note"] = "Weather data unavailable right now; pressure uses reports only."
+        if not as_of and result["score"] is not None:
+            with self.accounts.db() as c:
+                c.execute("INSERT OR REPLACE INTO pressure_history (field_id, day, score, level, top) VALUES (?,?,?,?,?)",
+                          (field_id, result["as_of"], result["score"], result["level"], result["top"]))
+        with self._lock:
+            self._cache[key] = (time.time(), result)
+        return result
+
+    def refresh_all(self) -> None:
+        for f in self.store.list_fields():
+            try:
+                self.pressure(f["id"], ttl=0)
+            except Exception:
+                log.exception("pressure refresh failed for %s", f["id"])
+
+    def start(self, every_s: float = 6 * 3600, delay_s: float = 60) -> None:
+        def loop() -> None:
+            time.sleep(delay_s)
+            while True:
+                self.refresh_all()
+                time.sleep(every_s)
+        threading.Thread(target=loop, daemon=True, name="disease-pressure").start()
+
+    def watch(self, field_id: str, as_of: date | None = None) -> dict[str, Any]:
+        """The short "things to watch" list shown next to the field score."""
+        p = self.pressure(field_id, as_of)
+        items: list[dict[str, Any]] = []
+        for i, d in enumerate(p["diseases"][:3]):
+            if d["level"] == "Low" and items:
+                continue
+            # Full detail for the top disease only; the rest get one line to keep the list short.
+            pts = d["points"][:2] + ([f"Look for: {d['watch']}"] if d["level"] != "Low" else []) if i == 0 else d["points"][:1]
+            items.append({"kind": "disease", "level": d["level"], "title": f"{d['name']}: {d['level'].lower()} pressure ({d['score']})", "points": pts})
+        w = p.get("weather") or {}
+        if w:
+            pts = [f"{w['wet_hours']} humid or rainy hours in the last {w['days']} days"]
+            if w.get("rain_mm") is not None:
+                pts.append(f"{w['rain_mm'] / 25.4:.1f} in of rain")
+            if w.get("hot_days"):
+                pts.append(f"{w['hot_days']} day(s) at 95°F or hotter: watch for heat stress")
+            src = p.get("weather_source") or {}
+            if src.get("station"):
+                pts.append(f"Station: {src['station']}")
+            items.append({"kind": "weather", "level": "info", "title": "Weather", "points": pts})
+        elif p.get("weather_note"):
+            items.append({"kind": "weather", "level": "info", "title": "Weather", "points": [p["weather_note"]]})
+        alerts = qa.assess(self.store, field_id, "ndvi")["alerts"]
+        recent = [a for a in alerts if a["kind"] != "senescence" and (not as_of or a["date"] <= as_of.isoformat())][-2:]
+        for a in reversed(recent):
+            items.append({"kind": "satellite", "level": a["severity"], "title": a.get("title") or a["message"], "points": a.get("points", [])[:2]})
+        return {"pressure": {k: p[k] for k in ("score", "level", "top", "as_of", "crop_kind", "method")},
+                "diseases": p["diseases"], "items": items}
+
+
+def make_router(
+    accounts: Accounts,
+    store: Store,
+    watcher: Watcher,
+    require_user: Callable[..., dict[str, Any]],
+    field_access: Callable[[str, dict[str, Any]], dict[str, Any]],
+) -> APIRouter:
+    with accounts.db() as c:
+        c.executescript(SCHEMA)
+    r = APIRouter()
+
+    def my_points(user: dict[str, Any]) -> list[tuple[float, float]]:
+        pts = []
+        for fid in accounts.fields_for(user["id"]):
+            try:
+                pts.append(watcher.centroid(store.get_field(fid)))
+            except KeyError:
+                continue
+        return pts
+
+    def dist_km(pts: list[tuple[float, float]], lat: float | None, lon: float | None) -> float | None:
+        if lat is None or lon is None or not pts:
+            return None
+        return min(km(a, b, lat, lon) for a, b in pts)
+
+    @r.get("/api/diseases")
+    def diseases_list() -> list[dict[str, Any]]:
+        out = [{"key": d.key, "name": d.name, "crop": d.crop, "watch": d.watch} for d in disease.DISEASES.values()]
+        return out + [{"key": k, "name": v, "crop": None, "watch": ""} for k, v in EXTRA_DISEASES.items()]
+
+    @r.get("/api/fields/{field_id}/pressure")
+    def pressure(field_id: str, as_of: date | None = None, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_access(field_id, user)
+        return watcher.pressure(field_id, as_of)
+
+    @r.get("/api/fields/{field_id}/watch")
+    def watch(field_id: str, as_of: date | None = None, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_access(field_id, user)
+        return watcher.watch(field_id, as_of)
+
+    @r.post("/api/crop-reports", status_code=201)
+    def create_report(body: ReportIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        if body.disease not in disease.DISEASES and body.disease not in EXTRA_DISEASES:
+            raise HTTPException(400, "Unknown disease or pest type.")
+        if body.severity not in disease.SEVERITY:
+            raise HTTPException(400, "severity must be trace, moderate, or severe")
+        observed = body.observed or datetime.now(timezone.utc).date()
+        if observed > datetime.now(timezone.utc).date() or observed < datetime.now(timezone.utc).date() - timedelta(days=60):
+            raise HTTPException(400, "Observed date must be within the last 60 days.")
+        crop = None
+        if body.field_id:
+            f = field_access(body.field_id, user)
+            lat, lon = watcher.centroid(f)
+            crop = disease.crop_kind(f.get("crop"))
+        elif body.lat is not None and body.lon is not None:
+            lat, lon = body.lat, body.lon
+        else:
+            raise HTTPException(400, "Pick one of your fields or share your location.")
+        rid = new_id("r")
+        d = disease.DISEASES.get(body.disease)
+        name = d.name if d else EXTRA_DISEASES[body.disease]
+        with accounts.db() as c:
+            c.execute("INSERT INTO crop_reports (id, user_id, disease, crop, severity, lat, lon, observed, notes, created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                      (rid, user["id"], body.disease, crop or (d.crop if d else None), body.severity, rounded(lat), rounded(lon),
+                       observed.isoformat(), (body.notes or "").strip() or None, now()))
+            if body.share:
+                text = f"Spotted {name.lower()} ({body.severity})" + (f": {body.notes.strip()}" if body.notes and body.notes.strip() else "")
+                c.execute("INSERT INTO posts (id, user_id, kind, body, report_id, lat, lon, created) VALUES (?,?,?,?,?,?,?,?)",
+                          (new_id("p"), user["id"], "report", text, rid, rounded(lat), rounded(lon), now()))
+        with watcher._lock:
+            watcher._cache.clear()  # nearby pressures change
+        store.log("crop_report.created", by=user["id"], report_id=rid, disease=body.disease)
+        return {"id": rid, "lat": rounded(lat), "lon": rounded(lon)}
+
+    @r.get("/api/crop-reports")
+    def list_reports(lat: float, lon: float, radius_km: float = Query(250, le=1000), days: int = Query(21, le=90),
+                     user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        rows = watcher.reports_near(lat, lon, radius_km, days)
+        names = {k: v.name for k, v in disease.DISEASES.items()} | EXTRA_DISEASES
+        return [{**{k: x[k] for k in ("id", "disease", "severity", "lat", "lon", "observed", "notes", "author")},
+                 "name": names.get(x["disease"], x["disease"]), "km": round(km(lat, lon, x["lat"], x["lon"]))} for x in rows]
+
+    @r.post("/api/posts", status_code=201)
+    def create_post(body: PostIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        lat = lon = None
+        if body.field_id:
+            lat, lon = watcher.centroid(field_access(body.field_id, user))
+            lat, lon = rounded(lat), rounded(lon)
+        pid = new_id("p")
+        with accounts.db() as c:
+            c.execute("INSERT INTO posts (id, user_id, kind, body, lat, lon, created) VALUES (?,?,?,?,?,?,?)",
+                      (pid, user["id"], "post", body.body.strip(), lat, lon, now()))
+        return {"id": pid}
+
+    def post_or_404(pid: str) -> dict[str, Any]:
+        with accounts.db() as c:
+            row = c.execute("SELECT * FROM posts WHERE id=?", (pid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Post not found")
+        return dict(row)
+
+    @r.post("/api/posts/{post_id}/helpful")
+    def toggle_helpful(post_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        post_or_404(post_id)
+        with accounts.db() as c:
+            if c.execute("SELECT 1 FROM helpful WHERE post_id=? AND user_id=?", (post_id, user["id"])).fetchone():
+                c.execute("DELETE FROM helpful WHERE post_id=? AND user_id=?", (post_id, user["id"]))
+                mine = False
+            else:
+                c.execute("INSERT INTO helpful (post_id, user_id) VALUES (?,?)", (post_id, user["id"]))
+                mine = True
+            n = c.execute("SELECT COUNT(*) FROM helpful WHERE post_id=?", (post_id,)).fetchone()[0]
+        return {"helpful": n, "mine": mine}
+
+    @r.get("/api/posts/{post_id}/comments")
+    def comments(post_id: str, user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        post_or_404(post_id)
+        with accounts.db() as c:
+            return [dict(x) for x in c.execute(
+                "SELECT cm.id, cm.user_id, cm.body, cm.created, p.display_name AS author FROM comments cm "
+                "LEFT JOIN profiles p ON p.user_id=cm.user_id WHERE cm.post_id=? ORDER BY cm.id", (post_id,))]
+
+    @r.post("/api/posts/{post_id}/comments", status_code=201)
+    def add_comment(post_id: str, body: CommentIn, user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        post_or_404(post_id)
+        with accounts.db() as c:
+            c.execute("INSERT INTO comments (post_id, user_id, body, created) VALUES (?,?,?,?)", (post_id, user["id"], body.body.strip(), now()))
+        return comments(post_id, user)
+
+    @r.get("/api/feed")
+    def feed(scope: str = Query("all", pattern="^(all|near|mine)$"), kind: str | None = Query(None, pattern="^(post|report|listing|field)$"),
+             user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        pts = my_points(user)
+        items: list[dict[str, Any]] = []
+        since = (datetime.now(timezone.utc) - timedelta(days=60)).replace(microsecond=0).isoformat()
+        if kind in (None, "post", "report"):
+            with accounts.db() as c:
+                rows = c.execute(
+                    "SELECT po.*, pr.display_name AS author, pr.business_name AS business, "
+                    " (SELECT COUNT(*) FROM helpful h WHERE h.post_id=po.id) AS helpful, "
+                    " (SELECT COUNT(*) FROM helpful h WHERE h.post_id=po.id AND h.user_id=?) AS mine, "
+                    " (SELECT COUNT(*) FROM comments cm WHERE cm.post_id=po.id) AS comments, "
+                    " cr.disease, cr.severity, cr.observed "
+                    "FROM posts po LEFT JOIN profiles pr ON pr.user_id=po.user_id LEFT JOIN crop_reports cr ON cr.id=po.report_id "
+                    "WHERE po.created>=? ORDER BY po.created DESC LIMIT 200", (user["id"], since)).fetchall()
+            for x in rows:
+                x = dict(x)
+                if kind and x["kind"] != kind:
+                    continue
+                d = dist_km(pts, x["lat"], x["lon"])
+                if scope == "near" and (d is None or d > NEAR_KM):
+                    continue
+                if scope == "mine" and x["user_id"] != user["id"]:
+                    continue
+                items.append({"type": x["kind"], "id": x["id"], "time": x["created"], "author": x["business"] or x["author"],
+                              "author_id": x["user_id"], "body": x["body"], "miles": round(d * 0.621) if d is not None else None,
+                              "helpful": x["helpful"], "mine": bool(x["mine"]), "comments": x["comments"],
+                              "disease": x["disease"], "severity": x["severity"], "observed": x["observed"]})
+        # Listings only have a free-text location, so they can't be distance-filtered for "near".
+        if kind in (None, "listing") and scope == "all":
+            with accounts.db() as c:
+                for x in c.execute("SELECT l.*, p.display_name AS author, p.business_name AS business FROM listings l "
+                                   "JOIN profiles p ON p.user_id=l.user_id WHERE l.status='active' AND l.created>=? "
+                                   "ORDER BY l.created DESC LIMIT 50", (since,)):
+                    items.append({"type": "listing", "id": x["id"], "time": x["created"], "author": x["business"] or x["author"],
+                                  "author_id": x["user_id"], "title": x["title"], "body": x["description"], "price": x["price"],
+                                  "location": x["location"], "kind_label": x["kind"]})
+        if kind in (None, "field"):
+            for fid in accounts.fields_for(user["id"]):
+                try:
+                    f = store.get_field(fid)
+                except KeyError:
+                    continue
+                if f.get("archived"):
+                    continue
+                for a in qa.assess(store, fid, "ndvi")["alerts"][-2:]:
+                    if a["kind"] == "senescence":
+                        continue
+                    items.append({"type": "field", "id": f"{fid}:{a['date']}:{a['kind']}", "time": a["date"] + "T12:00:00+00:00",
+                                  "field_id": fid, "field": f["name"], "title": a.get("title") or a["message"],
+                                  "points": a.get("points", []), "severity": a["severity"]})
+                with accounts.db() as c:
+                    hist = c.execute("SELECT day, score, level, top FROM pressure_history WHERE field_id=? ORDER BY day DESC LIMIT 2", (fid,)).fetchall()
+                order = {"Low": 0, "Moderate": 1, "High": 2}
+                if hist and hist[0]["level"] in ("Moderate", "High") and (len(hist) == 1 or order[hist[0]["level"]] > order.get(hist[1]["level"], 0)):
+                    items.append({"type": "field", "id": f"{fid}:{hist[0]['day']}:pressure", "time": hist[0]["day"] + "T06:00:00+00:00",
+                                  "field_id": fid, "field": f["name"], "severity": "high" if hist[0]["level"] == "High" else "medium",
+                                  "title": f"{hist[0]['top']} pressure is {hist[0]['level'].lower()} ({hist[0]['score']})",
+                                  "points": ["Open the field's watch list for why and what to look for"]})
+        items.sort(key=lambda i: i["time"], reverse=True)
+        return items[:100]
+
+    return r

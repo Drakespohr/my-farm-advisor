@@ -251,6 +251,99 @@
     threadTimer = setInterval(() => { if (location.hash === `#/messages/${convId}` && !document.hidden && !thread.querySelector("textarea").value) draw(); }, 10000);
   };
 
+  // ---------- feed --------------------------------------------------------------
+  const FILTERS = [["All", {}], ["Near me", { scope: "near" }], ["Reports", { kind: "report" }], ["Posts", { kind: "post" }],
+    ["Marketplace", { kind: "listing" }], ["My fields", { kind: "field" }]];
+  let feedFilter = 0;
+
+  function feedItem(it) {
+    const card = el("div", { class: `card fitem t-${it.type}` });
+    const ago = when(it.time);
+    if (it.type === "field") {
+      card.append(
+        el("div", { class: "head" }, chip(`Your field: ${it.field}`), el("span", { class: "muted", text: ago })),
+        el("a", { href: `#/fields/${encodeURIComponent(it.field_id)}`, class: "ftitle" }, el("b", { text: it.title })),
+        it.points && it.points.length ? el("ul", { class: "bullets small" }, it.points.map((p) => el("li", { text: p }))) : null);
+      return card;
+    }
+    if (it.type === "listing") {
+      card.append(
+        el("div", { class: "head" }, chip("New listing", "k-service"), el("a", { href: `#/u/${encodeURIComponent(it.author_id)}`, text: it.author }), el("span", { class: "muted", text: ago })),
+        el("a", { href: `#/market/${encodeURIComponent(it.id)}` }, el("b", { text: it.title })),
+        el("div", { class: "lmeta" }, it.price ? el("b", { text: it.price }) : null, it.location ? el("span", { class: "muted", text: `📍 ${it.location}` }) : null),
+        el("p", { class: "ldesc", text: it.body }));
+      return card;
+    }
+    const helpful = el("button", { type: "button", class: it.mine ? "on" : "", text: `👍 Helpful${it.helpful ? ` (${it.helpful})` : ""}` });
+    helpful.addEventListener("click", async () => {
+      const r = await api(`/api/posts/${it.id}/helpful`, { method: "POST" });
+      helpful.className = r.mine ? "on" : "";
+      helpful.textContent = `👍 Helpful${r.helpful ? ` (${r.helpful})` : ""}`;
+    });
+    const cmtBox = el("div", { class: "cmts", hidden: "" });
+    const cmtBtn = el("button", { type: "button", text: `💬 ${it.comments ? `${it.comments} comment${it.comments === 1 ? "" : "s"}` : "Comment"}` });
+    const drawComments = async () => {
+      const list = await api(`/api/posts/${it.id}/comments`);
+      const input = el("input", { type: "text", maxlength: "2000", placeholder: "Add a comment", required: "" });
+      const f = el("form", { class: "row gap" }, el("div", { class: "grow" }, input), el("button", { class: "btn small-btn", type: "submit", text: "Reply" }));
+      f.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        await api(`/api/posts/${it.id}/comments`, { method: "POST", body: JSON.stringify({ body: input.value }) });
+        drawComments();
+      });
+      cmtBox.replaceChildren(...list.map((c) => el("div", {}, el("b", { text: `${c.author}: ` }), el("span", { class: "prewrap", text: c.body }))), f);
+      cmtBtn.textContent = `💬 ${list.length ? `${list.length} comment${list.length === 1 ? "" : "s"}` : "Comment"}`;
+    };
+    cmtBtn.addEventListener("click", () => { cmtBox.hidden = !cmtBox.hidden; if (!cmtBox.hidden) drawComments(); });
+    card.append(
+      el("div", { class: "head" },
+        avatar(it.author, "sm"),
+        el("a", { href: `#/u/${encodeURIComponent(it.author_id)}`, text: it.author || "Member" }),
+        it.type === "report" ? chip(`Field report · ${it.severity}`, "closed") : null,
+        el("span", { class: "muted", text: ago + (it.miles != null ? ` · ${it.miles} mi away` : "") })),
+      el("p", { class: "prewrap", text: it.body }),
+      el("div", { class: "actions" }, helpful, cmtBtn,
+        el("button", { type: "button", text: "Report", onclick: () => report("post", it.id) })),
+      cmtBox);
+    return card;
+  }
+
+  FM.views.feed = async () => {
+    const p = page("view-feed");
+    const fields = (FM.state.fields && FM.state.fields.length ? FM.state.fields : await api("/api/fields")).filter((f) => f.my_role === "owner");
+    const body = el("textarea", { rows: "3", maxlength: "3000", placeholder: "Share an update: crop progress, what you're seeing, a question for the area…" });
+    const where = el("select", {}, el("option", { value: "", text: "No location" }),
+      ...fields.map((f) => el("option", { value: f.id, text: `Near ${f.name}` })));
+    const msg = el("p", { class: "small err", role: "alert" });
+    const composer = el("form", { class: "card composer" }, body,
+      el("div", { class: "row gap wrap" }, el("label", { class: "small" }, "Tag my area (≈1 km, never the exact field)", where),
+        el("span", { class: "grow" }), el("button", { class: "btn primary", type: "submit", text: "Post" })), msg);
+    const list = el("div", { class: "stack" });
+    const chips = el("div", { class: "chips" });
+    const load = async () => {
+      chips.replaceChildren(...FILTERS.map(([label], i) => el("button", { type: "button", class: i === feedFilter ? "on" : "", text: label,
+        onclick: () => { feedFilter = i; load(); } })));
+      const qs = new URLSearchParams(FILTERS[feedFilter][1]);
+      list.replaceChildren(el("p", { class: "muted small", text: "Loading…" }));
+      const items = await api(`/api/feed?${qs}`);
+      list.replaceChildren(...(items.length ? items.map(feedItem)
+        : [el("p", { class: "muted", text: feedFilter === 1 ? "Nothing within 100 miles of your fields yet." : "Nothing here yet. Post the first update!" })]));
+    };
+    composer.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!body.value.trim()) return;
+      try {
+        await api("/api/posts", { method: "POST", body: JSON.stringify({ body: body.value, field_id: where.value || null }) });
+        body.value = "";
+        load();
+      } catch (ex) { msg.textContent = ex.message; }
+    });
+    p.append(el("div", { class: "page-head" }, el("h1", { text: "Feed" })),
+      el("p", { class: "muted", text: "Field reports, updates from the area, new listings, and alerts on your fields." }),
+      composer, chips, list);
+    load();
+  };
+
   // ---------- profiles ----------------------------------------------------------
   FM.views.profile = async (userId, editing) => {
     const p = page("view-profile");
