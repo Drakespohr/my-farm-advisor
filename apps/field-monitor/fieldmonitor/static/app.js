@@ -35,7 +35,13 @@
     return node;
   }
   async function api(path, opts = {}) {
-    const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+    // The custom header is our CSRF guard: the server rejects writes without it.
+    const res = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Requested-With": "fieldmonitor", ...(opts.headers || {}) } });
+    if (res.status === 401 && !path.startsWith("/api/auth/")) {
+      state.me = null;
+      if (!location.hash.startsWith("#/login")) location.hash = "#/login";
+      throw new Error("Please log in.");
+    }
     if (!res.ok) {
       let msg = `${res.status} ${res.statusText}`;
       try {
@@ -396,7 +402,9 @@
         : null;
       const btn = el("button", { "data-id": f.id, onclick: () => selectField(f.id) },
         el("span", { class: "name", text: f.name + (f.archived ? " (archived)" : "") }),
-        el("span", { class: "val" }, sw, latest ? `NDVI ${fmt(latest.ndvi)}` : ""),
+        f.score && f.score.score != null
+          ? el("span", { class: `val score-pill ${scoreClass(f.score.score)}`, title: f.score.label, text: String(f.score.score) })
+          : el("span", { class: "val" }, sw, latest ? `NDVI ${fmt(latest.ndvi)}` : ""),
         el("span", { class: "sub", text: `${fmt(f.area_ac, 1)} ac${f.crop ? " · " + f.crop : ""} · ${syncShort(f)}` }),
       );
       if (state.field && state.field.id === f.id) btn.classList.add("active");
@@ -419,13 +427,18 @@
     document.querySelectorAll(".field-list button").forEach((b) => b.classList.toggle("active", b.dataset.id === id));
     $("detail").hidden = false;
     $("f-name").textContent = f.name;
-    $("f-meta").textContent = `${f.id} · ${fmt(f.area_ac, 1)} ac (${fmt(f.area_ha, 1)} ha)${f.crop ? " · " + f.crop : ""}`;
+    $("f-meta").textContent = `${fmt(f.area_ac, 1)} ac${f.crop ? " · " + f.crop : ""}${f.my_role === "viewer" ? " · shared with you" : ""}`;
     $("archive-btn").textContent = f.archived ? "Unarchive" : "Archive";
     $("edit-boundary-btn").hidden = Boolean(f.replaced_by);
+    $("owner-actions").hidden = f.my_role !== "owner";
+    $("sync-btn").hidden = f.my_role !== "owner";
+    $("share-panel").hidden = true;
+    renderScore(f.score);
     renderSync();
     $("csv-link").href = `/api/fields/${encodeURIComponent(id)}/timeseries.csv`;
     map.fitBounds(L.geoJSON(f.geometry).getBounds(), { padding: [30, 30], maxZoom: 16, animate: false });
-    if (location.hash.slice(1) !== id) history.replaceState(null, "", `#${encodeURIComponent(id)}`);
+    const want = `#/fields/${encodeURIComponent(id)}`;
+    if (location.hash !== want) history.replaceState(null, "", want);
     $("sidebar").classList.remove("open");
     markersLayer.clearLayers();
     $("zones-out").replaceChildren();
@@ -554,8 +567,8 @@
   function renderIndexSelect() {
     const sel = $("index-select");
     sel.replaceChildren();
-    for (const i of state.indices) sel.append(el("option", { value: i.key, text: `${i.plain} (${i.name})` }));
-    sel.append(el("option", { value: "truecolor", text: "Photo (true color)" }));
+    for (const i of state.indices) sel.append(el("option", { value: i.key, text: `${i.plain} (${i.name}): ${i.shows.toLowerCase()}` }));
+    sel.append(el("option", { value: "truecolor", text: "Photo: what the satellite saw" }));
     sel.value = state.indexKey;
   }
   $("index-select").addEventListener("change", (e) => {
@@ -576,7 +589,7 @@
       return;
     }
     const i = state.indexByKey[state.indexKey];
-    box.append(li("Shows", i.shows), li("Best for", i.use), li("Watch out", i.watch));
+    box.append(li("Best for", i.use), li("Watch out", i.watch));
   }
 
   function currentObs() { return state.obs.find((o) => o.id === state.obsId) || null; }
@@ -901,6 +914,101 @@
   // ---------- boot ---------------------------------------------------------
   $("toggle-sidebar").addEventListener("click", () => $("sidebar").classList.toggle("open"));
 
+  // ---------- score ------------------------------------------------------------
+  function scoreClass(v) { return v >= 80 ? "s-excellent" : v >= 65 ? "s-good" : v >= 50 ? "s-fair" : "s-poor"; }
+  function renderScore(sc) {
+    const box = $("score");
+    const pts = $("score-points");
+    box.replaceChildren();
+    pts.replaceChildren();
+    if (!sc || sc.score == null) {
+      box.append(el("div", { class: "score-empty", text: "Score after the first in-season images" }));
+      return;
+    }
+    const r = 30, c = 2 * Math.PI * r;
+    const ring = svg("svg", { viewBox: "0 0 72 72", class: `ring ${scoreClass(sc.score)}`, role: "img", "aria-label": `Field score ${sc.score} of 100, ${sc.label}` });
+    ring.append(svg("circle", { cx: 36, cy: 36, r, class: "track" }));
+    ring.append(svg("circle", { cx: 36, cy: 36, r, class: "fill", "stroke-dasharray": `${(c * sc.score) / 100} ${c}`, transform: "rotate(-90 36 36)" }));
+    const t = svg("text", { x: 36, y: 41, "text-anchor": "middle", class: "num" });
+    t.textContent = String(sc.score);
+    ring.append(t);
+    box.append(ring, el("div", { class: "score-label" }, el("b", { text: sc.label }), el("span", { class: "muted", text: sc.status !== "paused" ? "field score" : sc.points[0].startsWith("Season over") ? "season over" : "off-season" })));
+    box.title = `Score out of 100 as of ${sc.as_of}. ${sc.method}.`;
+    for (const p of sc.points) pts.append(el("li", { text: p }));
+  }
+
+  // ---------- sharing ----------------------------------------------------------
+  async function renderShare() {
+    const f = state.field;
+    const list = $("share-list");
+    list.replaceChildren();
+    const members = await api(`/api/fields/${f.id}/members`);
+    for (const m of members) {
+      list.append(el("li", {}, `${m.display_name} (${m.email}) · ${m.role === "owner" ? "owner" : "can view"} `,
+        m.role === "viewer" ? el("button", { type: "button", class: "linkbtn", text: "remove", onclick: async () => {
+          await api(`/api/fields/${f.id}/members/${m.user_id}`, { method: "DELETE" });
+          renderShare();
+        } }) : null));
+    }
+    $("showcase-toggle").checked = Boolean(f.showcase);
+  }
+  $("share-btn").addEventListener("click", () => {
+    const p = $("share-panel");
+    p.hidden = !p.hidden;
+    if (!p.hidden) renderShare();
+  });
+  $("share-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/api/fields/${state.field.id}/members`, { method: "POST", body: JSON.stringify({ email: $("share-email").value.trim() }) });
+      $("share-email").value = "";
+      $("share-msg").textContent = "Shared.";
+      renderShare();
+    } catch (err) { $("share-msg").textContent = err.message; }
+  });
+  $("showcase-toggle").addEventListener("change", async (e) => {
+    const rec = await api(`/api/fields/${state.field.id}`, { method: "PATCH", body: JSON.stringify({ showcase: e.target.checked }) });
+    state.field.showcase = rec.showcase;
+    $("share-msg").textContent = rec.showcase ? "Score is now on your profile." : "Removed from your profile.";
+  });
+
+  // ---------- routing & boot -----------------------------------------------------
+  const VIEWS = ["auth", "fields", "market", "messages", "profile"];
+  function showView(name) {
+    for (const v of VIEWS) $(`view-${v}`).hidden = v !== name;
+    $("topbar").hidden = name === "auth";
+    document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === name));
+    $("toggle-sidebar").hidden = name !== "fields";
+    if (name === "fields") setTimeout(() => map.invalidateSize(), 0);
+  }
+
+  let fieldsReady = false;
+  async function startFields() {
+    if (fieldsReady) return;
+    fieldsReady = true;
+    await loadFields();
+    if (!state.fields.length) mapperOpen("new");
+    else if (state.fields.length === 1 && !state.field) selectField(state.fields[0].id);
+    else if (!state.field) fitAllFields();
+    refresh();
+  }
+
+  async function route() {
+    let h = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
+    if (!state.me && !h.startsWith("login")) { location.hash = "#/login"; return; }
+    const [view, ...rest] = h.split("/");
+    const arg = rest.join("/");
+    if (view === "login") { showView("auth"); FM.views.auth(); return; }
+    if (view === "market") { showView("market"); FM.views.market(arg); return; }
+    if (view === "messages") { showView("messages"); FM.views.messages(arg); return; }
+    if (view === "u" || view === "me") { showView("profile"); FM.views.profile(view === "me" ? state.me.user.id : arg, view === "me"); return; }
+    showView("fields");
+    await startFields();
+    const fid = view === "fields" ? arg : view; // old links were "#<field id>"
+    if (fid && (!state.field || state.field.id !== fid)) selectField(fid);
+  }
+  window.addEventListener("hashchange", () => route().catch((e) => console.error(e)));
+
   async function boot() {
     initDates();
     const [health, indices] = await Promise.all([api("/api/health"), api("/api/indices")]);
@@ -909,14 +1017,19 @@
     state.indexByKey = Object.fromEntries(indices.map((i) => [i.key, i]));
     renderIndexSelect();
     renderIndexInfo();
-    await loadFields();
-    const fromHash = decodeURIComponent(location.hash.slice(1));
-    if (fromHash && state.fields.some((f) => f.id === fromHash)) selectField(fromHash);
-    else if (state.fields.length === 1) selectField(state.fields[0].id);
-    else fitAllFields();
-    if (!state.fields.length) mapperOpen("new");
-    refresh();
+    try { state.me = await api("/api/me"); } catch (_) { state.me = null; }
+    FM.setMe(state.me);
+    await route();
   }
-  window.addEventListener("hashchange", () => { const id = decodeURIComponent(location.hash.slice(1)); if (id) selectField(id); });
-  boot().catch((err) => { document.body.prepend(el("div", { class: "alert high", text: `Failed to start: ${err.message}` })); });
+
+  window.FM = Object.assign(window.FM || {}, { el, api, fmt, pct, relTime, state, views: {}, route, scoreClass, svg, setMe: () => {} });
+  $("logout-btn").addEventListener("click", async () => {
+    await api("/api/auth/logout", { method: "POST" });
+    location.hash = "#/login";
+    location.reload();
+  });
+  // market.js registers its views on window.FM before boot runs.
+  window.addEventListener("DOMContentLoaded", () => {
+    boot().catch((err) => { document.body.prepend(el("div", { class: "alert high", text: `Failed to start: ${err.message}` })); });
+  });
 })();

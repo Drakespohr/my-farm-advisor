@@ -9,6 +9,7 @@ import numpy as np
 
 from . import PROCESSING_VERSION, __version__
 from .analysis import field_stats
+from .area import area_baseline
 from .catalog import Scene
 from .indices import INDICES, REQUIRED_BANDS, compute_index
 from .raster import SCL_CLEAR, SCL_CLOUDY, read_field_stack
@@ -101,6 +102,11 @@ def process_observation(store: Store, field: dict[str, Any], scene: Scene, **par
     if status == "clear":
         valid = stack.valid
         qa = observation_qa(stack)
+        try:
+            qa["area"] = area_baseline(scene, field["geometry"], store.root / "cache")
+        except Exception as exc:  # the baseline is optional; never lose the observation over it
+            log.warning("area baseline failed for %s: %s", scene.id, exc)
+            qa["area"] = {"error": str(exc)[:200]}
         arrays["valid"] = valid
         arrays["field"] = stack.field_mask
         for key, idx in INDICES.items():

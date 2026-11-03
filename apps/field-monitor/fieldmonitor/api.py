@@ -22,12 +22,14 @@ import httpx
 from shapely.geometry import shape
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import PROCESSING_VERSION, __version__, analysis, diagnose, qa
+from . import PROCESSING_VERSION, __version__, analysis, diagnose, qa, score as scoring
+from .accounts import SESSION_COOKIE, Accounts
+from .social import make_router
 from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
 from .indices import DIVERGING, INDICES, ZONES, describe
@@ -60,6 +62,7 @@ class FieldPatch(BaseModel):
     crop: str | None = None
     notes: str | None = None
     archived: bool | None = None
+    showcase: bool | None = None
 
 
 class ProcessIn(BaseModel):
@@ -91,14 +94,40 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     app = FastAPI(title="Field Monitor", version=__version__, lifespan=lifespan)
     app.state.syncer = syncer
+    accounts = Accounts(store.root / "app.db")
+    app.state.accounts = accounts
+
+    @app.middleware("http")
+    async def csrf_guard(request: Request, call_next: Any) -> Any:
+        # State-changing API calls must come from our own page (custom header => same-origin only).
+        if request.url.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            if request.headers.get("x-requested-with") != "fieldmonitor":
+                return JSONResponse({"detail": "Missing X-Requested-With header."}, status_code=403)
+        return await call_next(request)
+
+    def require_user(request: Request) -> dict[str, Any]:
+        user = accounts.session_user(request.cookies.get(SESSION_COOKIE))
+        if not user:
+            raise HTTPException(401, "Please log in.")
+        return user
+
+    def field_score_for(field_id: str, as_of: str | None = None) -> dict[str, Any]:
+        return scoring.field_score(qa.classify(store.list_observations(field_id)), as_of)
     geocode_lock = threading.Lock()
     geocode_last = [0.0]
 
-    def field_or_404(field_id: str) -> dict[str, Any]:
+    def field_or_404(field_id: str, user: dict[str, Any], need: str = "viewer") -> dict[str, Any]:
+        """Return the field if `user` may see it (404 otherwise, so ids don't leak)."""
+        role = accounts.access(field_id, user["id"])
         try:
-            return store.get_field(field_id)
+            f = store.get_field(field_id)
         except KeyError:
-            raise HTTPException(404, f"Unknown field {field_id!r}") from None
+            role = None
+        if role is None:
+            raise HTTPException(404, f"Unknown field {field_id!r}")
+        if need == "owner" and role != "owner":
+            raise HTTPException(403, "Only the field's owner can do that.")
+        return {**f, "my_role": role}
 
     def ok_obs(field_id: str) -> list[dict[str, Any]]:
         """Clear observations that passed QA (no haze or one-pass artifacts)."""
@@ -126,7 +155,6 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             "app_version": __version__,
             "processing_version": PROCESSING_VERSION,
             "git_commit": git_commit(),
-            "data_dir": str(store.root),
             "auto_refresh_hours": syncer.refresh_hours or None,
         }
 
@@ -136,9 +164,12 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     # ---- fields --------------------------------------------------------------
     @app.get("/api/fields")
-    def list_fields(include_archived: bool = False) -> list[dict[str, Any]]:
+    def list_fields(include_archived: bool = False, user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
         out = []
+        mine = accounts.fields_for(user["id"])
         for f in store.list_fields(include_archived):
+            if f["id"] not in mine:
+                continue
             obs = qa.classify(store.list_observations(f["id"]))
             clear = [o for o in obs if o["status"] == "clear"]
             good = [o for o in clear if o["qa_status"] == "ok"]
@@ -152,12 +183,14 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                     if latest
                     else None,
                     "sync": syncer.status(f["id"]),
+                    "my_role": mine[f["id"]],
+                    "score": scoring.field_score(obs),
                 }
             )
         return out
 
     @app.post("/api/fields", status_code=201)
-    def create_fields(body: FieldIn) -> dict[str, Any]:
+    def create_fields(body: FieldIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
         try:
             if body.file_b64 and body.file_name:
                 raw = base64.b64decode(body.file_b64, validate=True)
@@ -193,6 +226,11 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                     notes=body.notes,
                     source=source,
                 )
+                owner = accounts.owner_of(rec["id"])
+                if owner and owner != user["id"]:
+                    errors.append({"feature": n, "name": name, "error": "Someone else already monitors this exact boundary."})
+                    continue
+                accounts.grant(rec["id"], user["id"], "owner")
                 (created if is_new else existing).append(rec["id"])
             except (ValueError, FileExistsError) as exc:
                 errors.append({"feature": n, "name": name, "error": str(exc)})
@@ -204,25 +242,29 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return {"created": created, "existing": existing, "errors": errors, "sync_jobs": syncing}
 
     @app.post("/api/fields/{field_id}/redraw", status_code=201)
-    def redraw(field_id: str, body: RedrawIn) -> dict[str, Any]:
-        field_or_404(field_id)
+    def redraw(field_id: str, body: RedrawIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user, "owner")
         try:
             feats = parse_geojson(body.geojson)
             if len(feats) != 1:
                 raise ValueError("Send exactly one boundary.")
             new = store.redraw_field(field_id, feats[0][0])
+            accounts.grant(new["id"], user["id"], "owner")
+            for m in accounts.field_members(field_id):
+                if m["role"] == "viewer":
+                    accounts.grant(new["id"], m["user_id"], "viewer")
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         job = syncer.start(new["id"], "new-field")
         return {"field": new, "replaced": field_id, "sync_job": job.view()}
 
     @app.post("/api/fields/{field_id}/sync", status_code=202)
-    def sync_now(field_id: str) -> dict[str, Any]:
-        field_or_404(field_id)
+    def sync_now(field_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user, "owner")
         return syncer.start(field_id, "manual").view()
 
     @app.get("/api/geocode")
-    def geocode(q: str = Query(..., min_length=2, max_length=200)) -> list[dict[str, Any]]:
+    def geocode(q: str = Query(..., min_length=2, max_length=200), user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
         """Place search for the mapping screen. Accepts 'lat, lon' or a place name (OpenStreetMap Nominatim)."""
         m = _COORD.match(q)
         if m:
@@ -259,12 +301,12 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return out
 
     @app.get("/api/fields/{field_id}")
-    def get_field(field_id: str) -> dict[str, Any]:
-        return field_or_404(field_id)
+    def get_field(field_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        return field_or_404(field_id, user)
 
     @app.patch("/api/fields/{field_id}")
-    def patch_field(field_id: str, body: FieldPatch) -> dict[str, Any]:
-        field_or_404(field_id)
+    def patch_field(field_id: str, body: FieldPatch, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user, "owner")
         changes = body.model_dump(exclude_none=True)
         if not changes:
             raise HTTPException(400, "Nothing to change.")
@@ -272,8 +314,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     # ---- scenes & processing -------------------------------------------------
     @app.get("/api/fields/{field_id}/scenes")
-    def scenes(field_id: str, start: date, end: date, max_cloud: float = 60.0) -> dict[str, Any]:
-        f = field_or_404(field_id)
+    def scenes(field_id: str, start: date, end: date, max_cloud: float = 60.0, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        f = field_or_404(field_id, user)
         found, source = search_scenes(f["geometry"], start, end, max_cloud)
         done = {o["scene_id"]: o for o in store.list_observations(field_id)}
         return {
@@ -285,8 +327,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         }
 
     @app.post("/api/fields/{field_id}/process", status_code=202)
-    def process(field_id: str, body: ProcessIn) -> dict[str, Any]:
-        f = field_or_404(field_id)
+    def process(field_id: str, body: ProcessIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        f = field_or_404(field_id, user, "owner")
         if body.end < body.start:
             raise HTTPException(400, "end must be on or after start")
         if body.end - body.start > timedelta(days=400):
@@ -294,20 +336,21 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return syncer.start(f["id"], "range", body.start, body.end, max_cloud=body.max_cloud).view()
 
     @app.get("/api/jobs/{job_id}")
-    def job_status(job_id: str) -> dict[str, Any]:
+    def job_status(job_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
         job = syncer.jobs.get(job_id)
-        if not job:
+        if not job or not accounts.access(job.field_id, user["id"]):
             raise HTTPException(404, "Unknown job")
         return job.view()
 
     # ---- observations --------------------------------------------------------
     @app.get("/api/fields/{field_id}/observations")
-    def observations(field_id: str) -> list[dict[str, Any]]:
-        field_or_404(field_id)
+    def observations(field_id: str, user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        field_or_404(field_id, user)
         return qa.classify(store.list_observations(field_id))
 
     @app.get("/api/fields/{field_id}/observations/{obs_id}/{name}.png")
-    def obs_png(field_id: str, obs_id: str, name: str) -> FileResponse:
+    def obs_png(field_id: str, obs_id: str, name: str, user: dict[str, Any] = Depends(require_user)) -> FileResponse:
+        field_or_404(field_id, user)
         try:
             path = store.png_path(field_id, obs_id, name)
         except KeyError:
@@ -318,7 +361,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
     @app.get("/api/fields/{field_id}/observations/{obs_id}/hotspots")
-    def obs_hotspots(field_id: str, obs_id: str, index: str = "ndvi", min_area_ha: float = Query(0.2, ge=0.01)) -> dict[str, Any]:
+    def obs_hotspots(field_id: str, obs_id: str, index: str = "ndvi", min_area_ha: float = Query(0.2, ge=0.01), user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user)
         index_or_400(index)
         arrays, transform, crs, meta = arrays_or_404(field_id, obs_id)
         spots = analysis.hotspots(arrays[index], arrays["valid"], transform, crs, min_area_ha=min_area_ha)
@@ -377,8 +421,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return mean, valid, transform, crs, dates
 
     @app.get("/api/fields/{field_id}/zones")
-    def zones(field_id: str, index: str = "ndvi", n: int = Query(3, ge=2, le=7), obs_id: str | None = None) -> dict[str, Any]:
-        field_or_404(field_id)
+    def zones(field_id: str, index: str = "ndvi", n: int = Query(3, ge=2, le=7), obs_id: str | None = None, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user)
         index_or_400(index)
         arr, valid, transform, crs, dates = zone_input(field_id, index, obs_id)
         try:
@@ -411,8 +455,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     # ---- change --------------------------------------------------------------
     @app.get("/api/fields/{field_id}/change")
-    def change(field_id: str, before: str, after: str, index: str = "ndvi", threshold: float = Query(0.1, gt=0)) -> dict[str, Any]:
-        field_or_404(field_id)
+    def change(field_id: str, before: str, after: str, index: str = "ndvi", threshold: float = Query(0.1, gt=0), user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user)
         index_or_400(index)
         a, ta, crs_a, ma = arrays_or_404(field_id, before)
         b, tb, crs_b, mb = arrays_or_404(field_id, after)
@@ -455,14 +499,14 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     # ---- time series & export ------------------------------------------------
     @app.get("/api/fields/{field_id}/alerts")
-    def alerts(field_id: str, index: str = "ndvi") -> list[dict[str, Any]]:
-        field_or_404(field_id)
+    def alerts(field_id: str, index: str = "ndvi", user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        field_or_404(field_id, user)
         index_or_400(index)
         return qa.assess(store, field_id, index)["alerts"]
 
     @app.get("/api/fields/{field_id}/timeseries.csv")
-    def timeseries_csv(field_id: str) -> Response:
-        f = field_or_404(field_id)
+    def timeseries_csv(field_id: str, user: dict[str, Any] = Depends(require_user)) -> Response:
+        f = field_or_404(field_id, user)
         buf = io.StringIO()
         w = csv.writer(buf)
         metrics = ("median", "mean", "p10", "p90", "cv")
@@ -485,6 +529,13 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="{f["id"]}_timeseries.csv"'},
         )
+
+    @app.get("/api/fields/{field_id}/score")
+    def field_score(field_id: str, as_of: str | None = None, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        field_or_404(field_id, user)
+        return field_score_for(field_id, as_of)
+
+    app.include_router(make_router(accounts, store, require_user, lambda fid: field_score_for(fid)))
 
     @app.exception_handler(FileExistsError)
     def conflict(_: Any, exc: FileExistsError) -> JSONResponse:

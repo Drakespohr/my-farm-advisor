@@ -183,7 +183,7 @@ class Store:
         return rec, True
 
     def update_field_meta(self, field_id: str, **changes: Any) -> dict[str, Any]:
-        allowed = {"name", "crop", "notes", "archived"}
+        allowed = {"name", "crop", "notes", "archived", "showcase"}
         bad = set(changes) - allowed
         if bad:
             raise ValueError(f"Cannot change {sorted(bad)}; only {sorted(allowed)} are editable.")

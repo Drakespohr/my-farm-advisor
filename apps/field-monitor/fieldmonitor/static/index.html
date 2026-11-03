@@ -9,12 +9,31 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">Field Monitor <span class="muted">Sentinel-2 · 10 m</span></div>
-    <button id="toggle-sidebar" class="btn ghost only-mobile" aria-controls="sidebar">Fields</button>
+  <header class="topbar" id="topbar" hidden>
+    <a class="brand" href="#/fields">Field Monitor</a>
+    <nav class="mainnav" aria-label="Main">
+      <a href="#/fields" data-nav="fields">My fields</a>
+      <a href="#/market" data-nav="market">Marketplace</a>
+      <a href="#/messages" data-nav="messages">Messages <span id="unread-badge" class="badge" hidden></span></a>
+    </nav>
+    <div class="row gap">
+      <button id="toggle-sidebar" class="btn ghost small-btn only-mobile" aria-controls="sidebar">Fields</button>
+      <details class="usermenu">
+        <summary class="avatar" id="avatar" aria-label="Account menu"></summary>
+        <div class="menu">
+          <a href="#/me" id="menu-profile">My profile</a>
+          <button type="button" id="logout-btn">Log out</button>
+        </div>
+      </details>
+    </div>
   </header>
 
-  <div class="layout">
+  <section id="view-auth" class="view auth" hidden></section>
+  <section id="view-market" class="view page" hidden></section>
+  <section id="view-messages" class="view page" hidden></section>
+  <section id="view-profile" class="view page" hidden></section>
+
+  <div class="layout view" id="view-fields" hidden>
     <aside id="sidebar" class="sidebar">
       <section>
         <div class="row space">
@@ -36,7 +55,7 @@
       </section>
 
       <section class="small muted about">
-        Sentinel-2 satellite · new image every 2–5 days<br><span id="version"></span>
+        Imagery: Copernicus Sentinel-2 · new image every 2–5 days<br>Cropland: ESA WorldCover 2021 (CC BY 4.0)<br><span id="version"></span>
       </section>
     </aside>
 
@@ -78,20 +97,34 @@
       <div class="map-legend" id="map-legend" hidden></div>
 
       <section id="detail" class="detail" hidden>
-        <div class="detail-head">
-          <div>
-            <h2 id="f-name"></h2>
-            <div class="muted small" id="f-meta"></div>
+        <div class="hero card">
+          <div class="hero-main">
+            <div class="hero-text">
+              <h2 id="f-name"></h2>
+              <div class="muted small" id="f-meta"></div>
+              <div class="status-row">
+                <span id="sync-line" class="sync-line"></span>
+                <button id="sync-btn" class="btn ghost small-btn" title="Check for a new satellite image now">↻ Check now</button>
+              </div>
+            </div>
+            <div class="score" id="score" aria-live="polite"></div>
           </div>
-          <div class="row gap wrap">
+          <ul id="score-points" class="bullets small"></ul>
+          <div class="row gap wrap hero-actions" id="owner-actions">
+            <button id="share-btn" class="btn ghost small-btn">Share</button>
             <button id="edit-boundary-btn" class="btn ghost small-btn">Edit boundary</button>
             <button id="archive-btn" class="btn ghost small-btn">Archive</button>
           </div>
-        </div>
-
-        <div class="status-row">
-          <span id="sync-line" class="sync-line"></span>
-          <button id="sync-btn" class="btn ghost small-btn" title="Check for a new satellite image now">↻ Check now</button>
+          <div id="share-panel" class="share-panel" hidden>
+            <form id="share-form" class="row gap wrap end">
+              <label class="grow">Share with (their account email) <input id="share-email" type="email" required placeholder="agronomist@example.com"></label>
+              <button class="btn" type="submit">Share</button>
+            </form>
+            <p class="small muted">People you share with can view this field but can't change it.</p>
+            <ul id="share-list" class="bullets small"></ul>
+            <label class="check small"><input type="checkbox" id="showcase-toggle"> Show this field's score on my public profile (map stays private)</label>
+            <p id="share-msg" class="small" role="status"></p>
+          </div>
         </div>
         <div id="job" class="job small" role="status" aria-live="polite" hidden>
           <div class="bar"><div id="job-bar"></div></div>
@@ -99,7 +132,7 @@
         </div>
 
         <div class="controls row gap wrap">
-          <label class="grow">Show
+          <label class="grow">Map layer
             <select id="index-select"></select>
           </label>
           <label>Date
@@ -184,5 +217,6 @@
   <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
   <script src="vendor/leaflet/leaflet.js"></script>
   <script src="app.js"></script>
+  <script src="market.js"></script>
 </body>
 </html>
