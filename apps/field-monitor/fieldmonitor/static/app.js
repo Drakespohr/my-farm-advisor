@@ -434,6 +434,7 @@
     $("sync-btn").hidden = f.my_role !== "owner";
     $("share-panel").hidden = true;
     renderScore(f.score);
+    loadWatch(f);
     renderSync();
     $("csv-link").href = `/api/fields/${encodeURIComponent(id)}/timeseries.csv`;
     map.fitBounds(L.geoJSON(f.geometry).getBounds(), { padding: [30, 30], maxZoom: 16, animate: false });
@@ -561,7 +562,16 @@
     }
     if (state.obsId) sel.value = state.obsId;
   }
-  $("obs-select").addEventListener("change", (e) => { state.obsId = e.target.value; state.obsPinned = true; showSelected(); renderChart(); });
+  $("obs-select").addEventListener("change", (e) => {
+    state.obsId = e.target.value;
+    state.obsPinned = true;
+    showSelected();
+    renderChart();
+    // Looking at an older image: show the disease pressure and weather from that time.
+    const o = currentObs();
+    const latest = state.obs.filter((x) => x.status === "clear").slice(-1)[0];
+    loadWatch(state.field, o && latest && o.id !== latest.id ? o.date : null);
+  });
   $("show-cloudy").addEventListener("change", () => { renderObsSelect(); renderChart(); });
 
   function renderIndexSelect() {
@@ -937,6 +947,72 @@
     for (const p of sc.points) pts.append(el("li", { text: p }));
   }
 
+  // ---------- watch list & disease reports --------------------------------------
+  const WATCH_ICON = { disease: "🦠", weather: "🌦", satellite: "🛰" };
+  async function loadWatch(f, asOf = null) {
+    const box = $("watch");
+    const badge = $("pressure-badge");
+    box.replaceChildren(el("p", { class: "small muted", text: "Checking disease pressure and weather…" }));
+    badge.hidden = true;
+    let w;
+    try { w = await api(`/api/fields/${f.id}/watch${asOf ? `?as_of=${asOf}` : ""}`); }
+    catch (err) { box.replaceChildren(el("p", { class: "small muted", text: `Watch list unavailable: ${err.message}` })); return; }
+    if (!state.field || state.field.id !== f.id) return;
+    const p = w.pressure;
+    if (p.score != null) {
+      badge.hidden = false;
+      badge.className = `pressure-badge p-${p.level.toLowerCase()}`;
+      badge.textContent = `Disease: ${p.level} · ${p.top}`;
+      badge.title = `${p.method} Score ${p.score}/100 as of ${p.as_of}.`;
+    }
+    box.replaceChildren(el("h4", { text: asOf ? `Things to watch (as of ${asOf})` : "Things to watch" }));
+    if (!p.crop_kind) box.append(el("p", { class: "small muted", text: "Set the crop (corn or soybean) when editing the field for crop-specific disease risk." }));
+    for (const it of w.items) {
+      box.append(el("div", { class: "witem" },
+        el("span", { class: "ic", "aria-hidden": "true", text: WATCH_ICON[it.kind] || "•" }),
+        el("span", { class: `t l-${String(it.level).toLowerCase()}`, text: it.title }),
+        el("ul", {}, (it.points || []).map((x) => el("li", { text: x })))));
+    }
+  }
+
+  let diseaseList = null;
+  $("report-btn").addEventListener("click", async () => {
+    const form = $("report-form");
+    form.hidden = !form.hidden;
+    if (form.hidden) return;
+    diseaseList = diseaseList || (await api("/api/diseases"));
+    const crop = (state.field.crop || "").toLowerCase().includes("soy") ? "soybean" : (state.field.crop || "").toLowerCase().includes("corn") ? "corn" : null;
+    const sel = $("rep-disease");
+    sel.replaceChildren(...diseaseList.filter((d) => !crop || !d.crop || d.crop === crop)
+      .map((d) => el("option", { value: d.key, text: d.crop ? `${d.name} (${d.crop})` : d.name })));
+    $("rep-date").value = isoToday();
+    $("rep-date").max = isoToday();
+    $("rep-msg").textContent = "";
+  });
+  $("rep-cancel").addEventListener("click", () => { $("report-form").hidden = true; });
+  $("report-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/crop-reports", { method: "POST", body: JSON.stringify({
+        disease: $("rep-disease").value, severity: $("rep-severity").value, observed: $("rep-date").value,
+        notes: $("rep-notes").value || null, field_id: state.field.id, share: $("rep-share").checked }) });
+      $("rep-notes").value = "";
+      $("rep-msg").textContent = "Thanks! Nearby fields' disease pressure now includes your report.";
+      loadWatch(state.field);
+    } catch (err) { $("rep-msg").textContent = err.message; }
+  });
+
+  $("details-btn").addEventListener("click", async () => {
+    const f = state.field;
+    const name = prompt("Field name", f.name);
+    if (name === null) return;
+    const crop = prompt("Crop this season (e.g. corn, soybean, wheat)", f.crop || "");
+    if (crop === null) return;
+    await api(`/api/fields/${f.id}`, { method: "PATCH", body: JSON.stringify({ name: name.trim() || f.name, crop: crop.trim() || null }) });
+    await loadFields();
+    selectField(f.id);
+  });
+
   // ---------- sharing ----------------------------------------------------------
   async function renderShare() {
     const f = state.field;
@@ -973,7 +1049,7 @@
   });
 
   // ---------- routing & boot -----------------------------------------------------
-  const VIEWS = ["auth", "fields", "market", "messages", "profile"];
+  const VIEWS = ["auth", "feed", "fields", "market", "messages", "profile"];
   function showView(name) {
     for (const v of VIEWS) $(`view-${v}`).hidden = v !== name;
     $("topbar").hidden = name === "auth";
@@ -1000,6 +1076,7 @@
     const arg = rest.join("/");
     if (view === "login") { showView("auth"); FM.views.auth(); return; }
     if (view === "market") { showView("market"); FM.views.market(arg); return; }
+    if (view === "feed") { showView("feed"); FM.views.feed(arg); return; }
     if (view === "messages") { showView("messages"); FM.views.messages(arg); return; }
     if (view === "u" || view === "me") { showView("profile"); FM.views.profile(view === "me" ? state.me.user.id : arg, view === "me"); return; }
     showView("fields");

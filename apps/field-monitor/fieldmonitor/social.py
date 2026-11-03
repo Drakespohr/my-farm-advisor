@@ -429,8 +429,8 @@ def make_router(
 
     @r.post("/api/reports", status_code=201)
     def report(body: ReportIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, bool]:
-        if body.kind not in ("listing", "user", "message"):
-            raise HTTPException(400, "kind must be listing, user, or message")
+        if body.kind not in ("listing", "user", "message", "post"):
+            raise HTTPException(400, "kind must be listing, user, message, or post")
         accounts.report(user["id"], body.kind, body.target_id, body.reason)
         store.log("report.created", by=user["id"], kind=body.kind, target=body.target_id)
         return {"ok": True}

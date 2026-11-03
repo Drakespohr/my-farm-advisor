@@ -12,6 +12,7 @@
   <header class="topbar" id="topbar" hidden>
     <a class="brand" href="#/fields" id="brand">Overacre</a>
     <nav class="mainnav" aria-label="Main">
+      <a href="#/feed" data-nav="feed">Feed</a>
       <a href="#/fields" data-nav="fields">My fields</a>
       <a href="#/market" data-nav="market">Marketplace</a>
       <a href="#/messages" data-nav="messages">Messages <span id="unread-badge" class="badge" hidden></span></a>
@@ -29,6 +30,7 @@
   </header>
 
   <section id="view-auth" class="view auth" hidden></section>
+  <section id="view-feed" class="view page" hidden></section>
   <section id="view-market" class="view page" hidden></section>
   <section id="view-messages" class="view page" hidden></section>
   <section id="view-profile" class="view page" hidden></section>
@@ -107,10 +109,29 @@
                 <button id="sync-btn" class="btn ghost small-btn" title="Check for a new satellite image now">↻ Check now</button>
               </div>
             </div>
-            <div class="score" id="score" aria-live="polite"></div>
+            <div class="hero-side">
+              <div class="score" id="score" aria-live="polite"></div>
+              <div id="pressure-badge" class="pressure-badge" hidden></div>
+            </div>
           </div>
           <ul id="score-points" class="bullets small"></ul>
+          <div class="watch" id="watch" aria-live="polite"></div>
+          <div class="row gap wrap hero-actions">
+            <button id="report-btn" class="btn ghost small-btn">＋ Report disease or pest</button>
+          </div>
+          <form id="report-form" class="report-form" hidden>
+            <div class="row gap wrap end">
+              <label>What <select id="rep-disease" required></select></label>
+              <label>How bad <select id="rep-severity"><option value="trace">Trace</option><option value="moderate" selected>Moderate</option><option value="severe">Severe</option></select></label>
+              <label>Seen on <input type="date" id="rep-date"></label>
+            </div>
+            <label>Notes (optional) <input type="text" id="rep-notes" maxlength="1000" placeholder="e.g. upper canopy, R2, 10% of plants"></label>
+            <label class="check small"><input type="checkbox" id="rep-share" checked> Post to the feed (location rounded to about 1 km)</label>
+            <div class="row gap"><button class="btn primary" type="submit">Send report</button><button class="btn ghost" type="button" id="rep-cancel">Cancel</button></div>
+            <p id="rep-msg" class="small" role="status"></p>
+          </form>
           <div class="row gap wrap hero-actions" id="owner-actions">
+            <button id="details-btn" class="btn ghost small-btn">Edit details</button>
             <button id="share-btn" class="btn ghost small-btn">Share</button>
             <button id="edit-boundary-btn" class="btn ghost small-btn">Edit boundary</button>
             <button id="archive-btn" class="btn ghost small-btn">Archive</button>
