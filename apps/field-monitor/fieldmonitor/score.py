@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from .area import percentile_of
+from .text import nice_date
 
 IN_SEASON_AREA_NDVI = 0.35
 SEASON_END_SHARE = 0.75  # area below 75% of its peak after the peak = maturity/harvest
@@ -88,17 +89,17 @@ def field_score(observations: list[dict[str, Any]], as_of: str | None = None) ->
     total_w = sum(WEIGHTS[k] for k in have)
     score = round(sum(WEIGHTS[k] * v for k, v in have.items()) / total_w)
 
-    points = [f"Greener than {vigor:.0f}% of cropland within 2 km"]
+    points = [f"Greener than {vigor:.0f}% of cropland within 1.2 miles"]
     if cv is not None:
         points.append("Even across the field" if cv <= 0.08 else "Some uneven areas" if cv <= 0.15 else "Patchy: check the Scout tab")
     if pace_delta is not None:
         points.append(
             "Keeping pace with the area" if abs(pace_delta) < 0.03
-            else f"Gaining on the area since {pace_from[5:]}" if pace_delta > 0
-            else f"Falling behind the area since {pace_from[5:]}"
+            else f"Gaining on the area since {nice_date(pace_from)}" if pace_delta > 0
+            else f"Falling behind the area since {nice_date(pace_from)}"
         )
     if paused:
-        points.insert(0, f"Season over: score from {last['date']}" if season_over else f"Off-season: last in-season score from {last['date']}")
+        points.insert(0, f"Season over: final score from {nice_date(last['date'])}" if season_over else f"Off-season: last score from {nice_date(last['date'])}")
 
     return {
         "score": score,
@@ -114,5 +115,5 @@ def field_score(observations: list[dict[str, Any]], as_of: str | None = None) ->
             "dates": [o["date"] for o in recent],
         },
         "points": points,
-        "method": "60% NDVI percentile vs cropland within 2 km, 25% evenness, 15% change vs area",
+        "method": "60% crop health vs. cropland within 1.2 miles, 25% evenness, 15% keeping pace with the area",
     }

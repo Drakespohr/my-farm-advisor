@@ -164,7 +164,7 @@ class Watcher:
                 continue
             # Full detail for the top disease only; the rest get one line to keep the list short.
             pts = d["points"][:2] + ([f"Look for: {d['watch']}"] if d["level"] != "Low" else []) if i == 0 else d["points"][:1]
-            items.append({"kind": "disease", "level": d["level"], "title": f"{d['name']}: {d['level'].lower()} pressure ({d['score']})", "points": pts})
+            items.append({"kind": "disease", "level": d["level"], "title": f"{d['name']}: {d['level'].lower()} risk ({d['score']}/100)", "points": pts})
         w = p.get("weather") or {}
         if w:
             pts = [f"{w['wet_hours']} humid or rainy hours in the last {w['days']} days"]
@@ -183,7 +183,8 @@ class Watcher:
         for a in reversed(recent):
             items.append({"kind": "satellite", "level": a["severity"], "title": a.get("title") or a["message"], "points": a.get("points", [])[:2]})
         return {"pressure": {k: p[k] for k in ("score", "level", "top", "as_of", "crop_kind", "method")},
-                "diseases": p["diseases"], "items": items}
+                "diseases": p["diseases"], "items": items, "weather": p.get("weather") or {},
+                "weather_source": p.get("weather_source") or {}, "weather_note": p.get("weather_note")}
 
 
 def make_router(

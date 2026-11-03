@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from .text import ago
 from .weather import Hour
 
 LEVELS = [(70, "High"), (40, "Moderate"), (0, "Low")]
@@ -154,7 +155,7 @@ def field_pressure(
                   f"{round(d.t_min * 9 / 5 + 32)}–{round(d.t_max * 9 / 5 + 32)}°F)" + (f"; {fc_d} more in the forecast" if fc_d else "")]
         if near:
             n = near[0]
-            points.append(f"Reported {n['miles']} mi {n['direction']}, {n['age_days']} days ago ({n['severity']})"
+            points.append(f"Reported {n['miles']} miles {n['direction']}, {ago(n['age_days'])} ({n['severity']})"
                           + (f"; {len(near) - 1} more nearby" if len(near) > 1 else ""))
         elif reports is not None:
             points.append("No reports nearby in the last 3 weeks")

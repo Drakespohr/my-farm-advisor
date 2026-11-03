@@ -63,6 +63,16 @@
   const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
   const pct = (v) => (v == null ? "–" : `${Math.round(v * 100)}%`);
   const isoToday = () => new Date().toISOString().slice(0, 10);
+  // The real scale of each layer's numbers (the color ramp may stop short of it).
+  const SCALE = { ndmi: "−1 to 1 scale", ndwi: "−1 to 1 scale", cire: "ratio, no fixed scale" };
+  const scaleOf = (key) => SCALE[key] || "0–1 scale";
+  // "2025-08-13" -> "Aug 13, 2025" (year only when it isn't this year). Parsed as a local date, never shifted by time zone.
+  const niceDate = (iso) => {
+    if (!iso) return "";
+    const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(y !== new Date().getFullYear() ? { year: "numeric" } : {}) });
+  };
   const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
   const gradient = (cmap) => `linear-gradient(to right, ${cmap.map(([p, c]) => `${rgb(c)} ${p * 100}%`).join(", ")})`;
   function colorAt(cmap, t) {
@@ -471,7 +481,7 @@
       const j = f.sync.job;
       return j.state === "searching" ? "finding imagery…" : `updating ${j.done}/${j.total}…`;
     }
-    const latest = f.latest ? `latest clear ${f.latest.date}` : "no clear imagery yet";
+    const latest = f.latest ? `last clear image ${niceDate(f.latest.date)}` : "no clear image yet";
     return f.sync && f.sync.last_synced ? `${latest} · checked ${relTime(f.sync.last_synced)}` : latest;
   }
 
@@ -556,8 +566,8 @@
     sel.replaceChildren();
     const key = state.indexKey === "truecolor" ? "ndvi" : state.indexKey;
     for (const o of visibleObs().slice().reverse()) {
-      const label = o.status !== "clear" ? `${o.date} · cloudy`
-        : `${o.date} · ${fmt(o.stats[key].median)}${o.qa_status === "suspect" ? " · ⚠ hazy/bad" : ""}`;
+      const label = o.status !== "clear" ? `${niceDate(o.date)} · too cloudy`
+        : `${niceDate(o.date)} · ${state.indexByKey[key].name} ${fmt(o.stats[key].median)}${o.qa_status === "suspect" ? " · ⚠ hazy" : ""}`;
       sel.append(el("option", { value: o.id, text: label }));
     }
     if (state.obsId) sel.value = state.obsId;
@@ -613,17 +623,37 @@
     const warn = o.qa_status === "suspect" ? "⚠ Hazy or bad image: trust less" : "";
     if (showTrue) {
       setOverlay(`${base}/truecolor.png`, o.bounds, {
-        title: `Photo · ${o.date}`, items: o.status === "clear" ? (warn ? [{ color: "#ccc", label: warn }] : []) : [{ color: "#ccc", label: "Too cloudy to measure" }],
+        title: `Photo · ${niceDate(o.date)}`, items: o.status === "clear" ? (warn ? [{ color: "#ccc", label: warn }] : []) : [{ color: "#ccc", label: "Too cloudy to measure" }],
       });
     } else {
       const i = state.indexByKey[state.indexKey];
       const st = o.stats[i.key];
       setOverlay(`${base}/${i.key}.png`, o.bounds, {
-        title: `${i.plain} · ${o.date}`, cmap: i.colormap, lo: `${i.display_range[0]} low`, hi: `high ${i.display_range[1]}`,
-        note: warn || `Field average ${fmt(st.mean)}`,
+        title: `${i.plain} (${i.name}) · ${niceDate(o.date)}`, cmap: i.colormap, lo: `${i.display_range[0]} low`, hi: `high ${i.display_range[1]}`,
+        note: warn || `Field average ${i.name} ${fmt(st.mean)} (${scaleOf(i.key)})`,
       });
     }
+    renderHealth(o);
     loadHotspots(o);
+  }
+
+  // Crop-health tile: the selected image's NDVI on a colored 0–1 bar with a plain label.
+  function renderHealth(o) {
+    const box = $("health");
+    box.replaceChildren();
+    const nd = state.indexByKey.ndvi;
+    if (!o || o.status !== "clear" || !nd) {
+      box.append(el("div", { class: "big muted", text: "—" }), el("div", { class: "sub", text: o ? `Too cloudy on ${niceDate(o.date)}` : "No images yet" }));
+      return;
+    }
+    const v = o.stats.ndvi.median;
+    const label = nd.guide.reduce((acc, [cut, text]) => (v >= cut ? text : acc), "bare soil");
+    const pos = Math.max(0, Math.min(1, v / 0.9)) * 100;
+    box.append(
+      el("div", {}, el("span", { class: "big", text: fmt(v) }), el("span", { class: "unit", text: " NDVI (0–1 scale)" })),
+      el("div", { class: "bar", style: `background:${gradient(nd.colormap)}`, role: "img", "aria-label": `NDVI ${fmt(v)} of 1` }, el("i", { style: `left:${pos}%` })),
+      el("div", { class: "ends" }, el("span", { text: "bare" }), el("span", { text: "dense" })),
+      el("div", { class: "sub", text: `${label[0].toUpperCase()}${label.slice(1)} · image ${niceDate(o.date)}` }));
   }
 
   const signed = (v, d = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
@@ -638,9 +668,9 @@
     // Surface water only matters when there is some (NDWI > 0); otherwise it just mirrors thin crop.
     const vals = (ex.values || []).filter((v) => v.key !== "ndwi" || v.spot > 0);
     if (vals.length) {
-      box.append(el("div", { class: "lbl", text: "Here vs. field average" }));
+      box.append(el("div", { class: "lbl", text: "Here vs. field average (0–1 scales)" }));
       box.append(el("ul", {}, vals.map((v) => el("li", {},
-        `${v.label.replace(/ \(.*\)/, "")}: ${fmt(v.spot)} vs ${fmt(v.field)} `,
+        `${v.label}: ${fmt(v.spot)} here vs ${fmt(v.field)} avg `,
         el("span", { class: v.key === "ndwi" ? "" : v.diff < 0 ? "neg" : "pos", text: `(${signed(v.diff)})` })))));
     }
     if (ex.pattern && ex.pattern.length) {
@@ -670,7 +700,7 @@
     if (o.id !== state.obsId) return;
     const name = state.indexByKey[key].name;
     if (!res.hotspots.length) {
-      box.append(el("p", { class: "small", text: `✓ No problem spots on ${res.date}. The field looks even.` }));
+      box.append(el("p", { class: "small", text: `✓ No problem spots on ${niceDate(res.date)}. The field looks even.` }));
       return;
     }
     const list = el("div", { class: "spot-list" });
@@ -694,7 +724,7 @@
       } },
         el("span", { class: "num", text: String(h.rank) }),
         el("span", { class: "t", text: `${fmt(h.area_ac, 1)} ac` }),
-        el("span", { class: "d", text: ndvi ? `NDVI ${signed(ndvi.diff)} vs avg` : `${name} −${fmt(h.deficit)}` }),
+        el("span", { class: "d", text: ndvi ? `NDVI ${fmt(Math.abs(ndvi.diff))} ${ndvi.diff < 0 ? "below" : "above"} field avg` : `${name} ${fmt(h.deficit)} below avg` }),
         el("span", { class: "s", text: top ? `Maybe: ${shortCause(top.cause)}` : "Tap for details" }),
       ));
     }
@@ -756,6 +786,9 @@
       tx.textContent = d.toLocaleString(undefined, { month: "short" }) + (d.getMonth() === 0 ? ` ${d.getFullYear()}` : "");
       axis.append(tx);
     }
+    const unit = svg("text", { x: m.l, y: m.t - 2, class: "unit-label" });
+    unit.textContent = `${idx.name} (${scaleOf(idx.key)})`;
+    axis.append(unit);
     s.append(axis);
 
     const band = pts.map((p) => `${x(p.t)},${y(p.s.p90)}`).concat(pts.slice().reverse().map((p) => `${x(p.t)},${y(p.s.p10)}`));
@@ -789,7 +822,7 @@
       cross.setAttribute("x1", x(p.t)); cross.setAttribute("x2", x(p.t)); cross.setAttribute("visibility", "visible");
       tip.replaceChildren(
         el("div", { class: "v", text: `${idx.name} ${fmt(p.s.median)}` }),
-        el("div", { text: p.o.date }),
+        el("div", { text: niceDate(p.o.date) }),
         el("div", { class: "muted", text: `10–90%: ${fmt(p.s.p10)}–${fmt(p.s.p90)} · CV ${fmt(p.s.cv)}` }),
         el("div", { class: "muted", text: `${pct(p.o.field_clear_fraction)} of field clear · click to view` }),
         p.o.qa_status === "suspect" ? el("div", { class: "warn-text", text: `⚠ Excluded from trend and alerts: ${qaText(p.o)}` })
@@ -844,7 +877,7 @@
         el("span", { class: "swatch", style: `background:${colors[i]}` }),
         el("b", { text: `Zone ${zz.zone}${i === 0 ? " (weakest)" : i === z.zones.length - 1 ? " (strongest)" : ""}: ` }),
         `${fmt(zz.area_ac, 1)} ac (${pct(zz.share)})`)));
-      ul.append(el("li", { text: z.mode === "multi-date" ? `Based on ${z.dates.length} images, ${z.dates[0]} → ${z.dates[z.dates.length - 1]}` : `Based on ${z.dates[0]} only` }));
+      ul.append(el("li", { text: z.mode === "multi-date" ? `Based on ${z.dates.length} images, ${niceDate(z.dates[0])} → ${niceDate(z.dates[z.dates.length - 1])}` : `Based on ${niceDate(z.dates[0])} only` }));
       ul.append(el("li", { text: "Use for sampling or variable-rate plans; check against yield maps" }));
       out.append(ul);
     } catch (err) {
@@ -863,7 +896,7 @@
     const clear = state.obs.filter((o) => o.status === "clear");
     for (const [id, def] of [["chg-before", Math.max(0, clear.length - 2)], ["chg-after", clear.length - 1]]) {
       const sel = $(id);
-      sel.replaceChildren(...clear.map((o) => el("option", { value: o.id, text: o.date })));
+      sel.replaceChildren(...clear.map((o) => el("option", { value: o.id, text: niceDate(o.date) })));
       if (clear.length) sel.value = clear[def].id;
     }
   }
@@ -877,7 +910,7 @@
       const c = await api(`/api/fields/${state.field.id}/change?${q}`);
       markersLayer.clearLayers();
       setOverlay(c.png, c.bounds, {
-        title: `${state.indexByKey[key].plain}: ${c.before} → ${c.after}`,
+        title: `${state.indexByKey[key].plain}: ${niceDate(c.before)} → ${niceDate(c.after)}`,
         cmap: [[0, [178, 24, 43]], [0.25, [239, 138, 98]], [0.5, [247, 247, 247]], [0.75, [103, 169, 207]], [1, [33, 102, 172]]],
         lo: "worse", hi: "better", note: "Red = got worse · blue = got better",
       });
@@ -887,7 +920,7 @@
       }
       const ul = el("ul", { class: "bullets small" });
       const li = (k, v) => ul.append(el("li", {}, el("b", { text: `${k}: ` }), v));
-      li("Typical change", `${signed(c.stats.median)} ${name}`);
+      li("Typical change", `${signed(c.stats.median)} ${name} (${scaleOf(key)})`);
       li("Got worse", `${fmt(c.declined_ha * 2.471, 1)} ac (${pct(c.declined_share)})`);
       li("Got better", `${fmt(c.improved_ha * 2.471, 1)} ac (${pct(c.improved_share)})`);
       if (c.ring_change != null && c.field_change < -0.05) {
@@ -913,7 +946,7 @@
     t.append(el("tr", {}, ["Date", "Scene", "Clear", "Quality", ...state.indices.map((i) => i.name)].map((h) => el("th", { text: h }))));
     for (const o of state.obs.slice().reverse()) {
       t.append(el("tr", { class: "clickable", onclick: () => { state.obsId = o.id; state.obsPinned = true; renderObsSelect(); showSelected(); renderChart(); } },
-        el("td", { text: o.date }),
+        el("td", { text: niceDate(o.date) }),
         el("td", { text: o.scene_id, class: "muted" }),
         el("td", { text: pct(o.field_clear_fraction) }),
         el("td", { text: o.status !== "clear" ? "cloudy" : (qaShort(o) || "ok"), title: qaText(o) }),
@@ -932,46 +965,89 @@
     box.replaceChildren();
     pts.replaceChildren();
     if (!sc || sc.score == null) {
-      box.append(el("div", { class: "score-empty", text: "Score after the first in-season images" }));
+      box.append(el("div", { class: "sub", text: "Appears after the first in-season images" }));
       return;
     }
     const r = 30, c = 2 * Math.PI * r;
-    const ring = svg("svg", { viewBox: "0 0 72 72", class: `ring ${scoreClass(sc.score)}`, role: "img", "aria-label": `Field score ${sc.score} of 100, ${sc.label}` });
+    const ring = svg("svg", { viewBox: "0 0 72 72", class: `ring ${scoreClass(sc.score)}`, role: "img", "aria-label": `Field score ${sc.score} out of 100, ${sc.label}` });
     ring.append(svg("circle", { cx: 36, cy: 36, r, class: "track" }));
     ring.append(svg("circle", { cx: 36, cy: 36, r, class: "fill", "stroke-dasharray": `${(c * sc.score) / 100} ${c}`, transform: "rotate(-90 36 36)" }));
-    const t = svg("text", { x: 36, y: 41, "text-anchor": "middle", class: "num" });
+    const t = svg("text", { x: 36, y: 38, "text-anchor": "middle", class: "num" });
     t.textContent = String(sc.score);
-    ring.append(t);
-    box.append(ring, el("div", { class: "score-label" }, el("b", { text: sc.label }), el("span", { class: "muted", text: sc.status !== "paused" ? "field score" : sc.points[0].startsWith("Season over") ? "season over" : "off-season" })));
-    box.title = `Score out of 100 as of ${sc.as_of}. ${sc.method}.`;
+    const of = svg("text", { x: 36, y: 50, "text-anchor": "middle", class: "of" });
+    of.textContent = "/ 100";
+    ring.append(t, of);
+    const status = sc.status !== "paused" ? "vs. nearby farms" : sc.points[0].startsWith("Season over") ? "season over" : "off-season";
+    box.append(ring, el("div", { class: "score-label" }, el("b", { text: sc.label }), el("span", { class: "muted", text: status })));
+    box.title = `Score out of 100 as of ${niceDate(sc.as_of)}. ${sc.method}.`;
+    pts.append(el("li", { class: "cap-li", text: "Why this score:" }));
     for (const p of sc.points) pts.append(el("li", { text: p }));
   }
 
   // ---------- watch list & disease reports --------------------------------------
-  const WATCH_ICON = { disease: "🦠", weather: "🌦", satellite: "🛰" };
+  const LEVELS = ["Low", "Moderate", "High"];
+  function renderRisk(p) {
+    const box = $("pressure-badge");
+    box.replaceChildren();
+    if (p.score == null) { box.append(el("div", { class: "big muted", text: "—" }), el("div", { class: "sub", text: "Set the crop to see disease risk" })); return; }
+    const lvl = p.level.toLowerCase();
+    box.append(
+      el("div", {}, el("span", { class: `big ${lvl}`, text: p.level }), el("span", { class: "unit", text: ` · ${p.score}/100` })),
+      el("div", { class: "meter", role: "img", "aria-label": `Disease risk ${p.level}` }, LEVELS.map((L) => el("span", { class: `${L.toLowerCase()}${L === p.level ? " on" : ""}` }))),
+      el("div", { class: "scale" }, LEVELS.map((L) => el("span", { text: L }))),
+      el("div", { class: "sub", text: `Highest: ${p.top}` }));
+    box.title = `${p.method} As of ${niceDate(p.as_of)}.`;
+  }
+
   async function loadWatch(f, asOf = null) {
     const box = $("watch");
-    const badge = $("pressure-badge");
-    box.replaceChildren(el("p", { class: "small muted", text: "Checking disease pressure and weather…" }));
-    badge.hidden = true;
+    box.replaceChildren(el("p", { class: "small muted", text: "Checking disease risk and weather…" }));
+    $("pressure-badge").replaceChildren(el("div", { class: "sub", text: "Checking…" }));
     let w;
     try { w = await api(`/api/fields/${f.id}/watch${asOf ? `?as_of=${asOf}` : ""}`); }
     catch (err) { box.replaceChildren(el("p", { class: "small muted", text: `Watch list unavailable: ${err.message}` })); return; }
     if (!state.field || state.field.id !== f.id) return;
-    const p = w.pressure;
-    if (p.score != null) {
-      badge.hidden = false;
-      badge.className = `pressure-badge p-${p.level.toLowerCase()}`;
-      badge.textContent = `Disease: ${p.level} · ${p.top}`;
-      badge.title = `${p.method} Score ${p.score}/100 as of ${p.as_of}.`;
+    renderRisk(w.pressure);
+    box.replaceChildren(el("h4", { text: asOf ? `Things to watch · as of ${niceDate(asOf)}` : "Things to watch" }));
+    if (!w.pressure.crop_kind) box.append(el("p", { class: "small muted", text: "Tip: set the crop (Manage → Edit name & crop) to get corn- or soybean-specific disease risk." }));
+
+    // Disease risk: one bar per disease (0–100), details for the top one only.
+    const top = w.diseases.slice(0, 3);
+    if (top.length) {
+      const sec = el("div", { class: "sec" }, el("div", { class: "cap", text: "Disease risk (0–100, from recent weather, nearby reports, and crop stage)" }));
+      for (const d of top) {
+        const lvl = d.level.toLowerCase();
+        sec.append(el("div", { class: "dbar" }, el("span", { text: d.name }),
+          el("div", { class: "track", role: "img", "aria-label": `${d.name} ${d.score} out of 100, ${d.level}` }, el("div", { class: `fill ${lvl}`, style: `width:${Math.max(3, d.score)}%` })),
+          el("span", { class: "val", text: `${d.score}/100` })));
+      }
+      const d = top[0];
+      sec.append(el("ul", { class: "bullets small" },
+        d.points.slice(0, 2).map((x) => el("li", { text: x })),
+        d.level !== "Low" ? el("li", {}, el("b", { text: `Look for (${d.name.toLowerCase()}): ` }), d.watch) : null));
+      box.append(sec);
     }
-    box.replaceChildren(el("h4", { text: asOf ? `Things to watch (as of ${asOf})` : "Things to watch" }));
-    if (!p.crop_kind) box.append(el("p", { class: "small muted", text: "Set the crop (corn or soybean) when editing the field for crop-specific disease risk." }));
-    for (const it of w.items) {
+
+    // Weather: three small tiles for the last 14 days.
+    const wx = w.weather || {};
+    if (wx.hours) {
+      const src = w.weather_source || {};
+      box.append(el("div", { class: "sec" },
+        el("div", { class: "cap", text: `Weather, last ${wx.days} days${src.station ? ` · ${src.station}` : ""}` }),
+        el("div", { class: "wtiles" },
+          el("div", { class: "wtile" }, el("b", { text: wx.rain_mm == null ? "n/a" : `${(wx.rain_mm / 25.4).toFixed(1)} in` }), wx.rain_mm == null ? "rain not reported" : "☔ rain"),
+          el("div", { class: "wtile" }, el("b", { text: `${wx.wet_hours} h` }), "💧 humid or wet"),
+          el("div", { class: "wtile" }, el("b", { text: `${wx.hot_days} days` }), "🌡 at 95°F+"))));
+    } else if (w.weather_note) {
+      box.append(el("p", { class: "small muted", text: `🌦 ${w.weather_note}` }));
+    }
+
+    // Satellite alerts, as short titled bullets.
+    for (const it of w.items.filter((i) => i.kind === "satellite")) {
       box.append(el("div", { class: "witem" },
-        el("span", { class: "ic", "aria-hidden": "true", text: WATCH_ICON[it.kind] || "•" }),
+        el("span", { class: "ic", "aria-hidden": "true", text: "🛰" }),
         el("span", { class: `t l-${String(it.level).toLowerCase()}`, text: it.title }),
-        el("ul", {}, (it.points || []).map((x) => el("li", { text: x })))));
+        el("ul", {}, (it.points || []).slice(0, 2).map((x) => el("li", { text: x })))));
     }
   }
 
@@ -1002,6 +1078,7 @@
     } catch (err) { $("rep-msg").textContent = err.message; }
   });
 
+  document.querySelectorAll("#owner-actions .menu button").forEach((b) => b.addEventListener("click", () => { $("owner-actions").open = false; }));
   $("details-btn").addEventListener("click", async () => {
     const f = state.field;
     const name = prompt("Field name", f.name);

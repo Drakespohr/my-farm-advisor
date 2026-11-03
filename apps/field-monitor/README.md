@@ -48,6 +48,12 @@ run behind HTTPS (set `FIELD_MONITOR_COOKIE_SECURE=1` if TLS ends at a proxy) an
 
 ## Disease pressure, watch list, and feed
 
+**Field header:** three "at a glance" tiles: **Field score** (ring, out of 100, with "Why this
+score" bullets), **Disease risk** (Low/Moderate/High meter, x/100, highest disease), and **Crop
+health** (the selected image's NDVI on a colored 0–1 bar with a plain label like "Dense canopy").
+Field actions sit under **Manage**. Every number carries a unit or scale (/100, 0–1 scale, in,
+miles, °F) and dates read like "Aug 13, 2025".
+
 **Things to watch** sits under the field score: the top disease risks, recent weather, and any
 satellite alerts, a few bullets each. A badge beside the score shows the overall disease level.
 
@@ -369,7 +375,7 @@ drawn by tapping 4 corners, a dragged corner, an inserted and undone midpoint, t
 The automatic backfill found 73 passes, 30 clear over the field, newest 2026-10-22. Edit
 boundary produced `-v2`. Map and server acreage agree (16.5 ac).
 
-Tests: `pytest` runs 92 unit/API tests (index formulas against hand calculations, a planted
+Tests: `pytest` runs 93 unit/API tests (index formulas against hand calculations, a planted
 1 ha hotspot recovered at the right GPS location, zone balance, change detection, alert
 logic, store immutability, path-traversal guards, sync windows and per-field job dedupe,
 boundary versioning, DJI-style KML/KMZ parsing, haze and transient suspects, paired-pixel
