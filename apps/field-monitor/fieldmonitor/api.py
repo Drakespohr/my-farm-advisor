@@ -8,9 +8,6 @@ import csv
 import io
 import logging
 import os
-import re
-import threading
-import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -28,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import APP_NAME, APP_TAGLINE, PROCESSING_VERSION, __version__, analysis, diagnose, qa, score as scoring
+from . import search as mapsearch
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
 from .news import News
@@ -82,7 +80,6 @@ def _png_data_url(data: bytes) -> str:
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 BULK_SYNC_LIMIT = 5  # larger imports are left to the scheduler, which syncs one field at a time
-_COORD = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$")
 
 
 def create_app(store: Store | None = None, refresh_hours: float | None = None) -> FastAPI:
@@ -138,8 +135,9 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     def field_score_for(field_id: str, as_of: str | None = None) -> dict[str, Any]:
         return scoring.field_score(qa.classify(store.list_observations(field_id)), as_of)
-    geocode_lock = threading.Lock()
-    geocode_last = [0.0]
+    geocoder = mapsearch.Geocoder(f"my-farm-advisor-field-monitor/{__version__}",
+                                  countries=os.getenv("FIELD_MONITOR_GEOCODE_COUNTRIES", "us"))
+    app.state.geocoder = geocoder
 
     def field_or_404(field_id: str, user: dict[str, Any], need: str = "viewer") -> dict[str, Any]:
         """Return the field if `user` may see it (404 otherwise, so ids don't leak)."""
@@ -292,40 +290,21 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     @app.get("/api/geocode")
     def geocode(q: str = Query(..., min_length=2, max_length=200), user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
-        """Place search for the mapping screen. Accepts 'lat, lon' or a place name (OpenStreetMap Nominatim)."""
-        m = _COORD.match(q)
-        if m:
-            lat, lon = float(m.group(1)), float(m.group(2))
-            if -90 <= lat <= 90 and -180 <= lon <= 180:
-                return [{"name": f"{lat:.6f}, {lon:.6f}", "lat": lat, "lon": lon, "bbox": None}]
-        # Nominatim's usage policy: identify the app and stay under 1 request/second.
-        with geocode_lock:
-            wait = 1.0 - (time.monotonic() - geocode_last[0])
-            if wait > 0:
-                time.sleep(wait)
-            geocode_last[0] = time.monotonic()
-        try:
-            r = httpx.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={"q": q, "format": "jsonv2", "limit": 6},
-                headers={"User-Agent": f"my-farm-advisor-field-monitor/{__version__}"},
-                timeout=10.0,
-            )
-            r.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise HTTPException(502, f"Place search unavailable ({exc.__class__.__name__}). Type coordinates as 'lat, lon' instead.") from None
-        out = []
-        for hit in r.json():
-            bb = hit.get("boundingbox")
-            out.append(
-                {
-                    "name": hit.get("display_name", ""),
-                    "lat": float(hit["lat"]),
-                    "lon": float(hit["lon"]),
-                    "bbox": [[float(bb[0]), float(bb[2])], [float(bb[1]), float(bb[3])]] if bb else None,
-                }
-            )
-        return out
+        """Place search (kept for older clients; the map uses /api/search). 'lat, lon', an address, or a place."""
+        coords = mapsearch.parse_coords(q)
+        if coords:
+            return [{"name": f"{coords[0]:.6f}, {coords[1]:.6f}", "lat": coords[0], "lon": coords[1], "bbox": None}]
+        places, error = geocoder.lookup(q)
+        if error and not places:
+            raise HTTPException(502, error)
+        return [{k: p[k] for k in ("name", "lat", "lon", "bbox")} for p in places]
+
+    @app.get("/api/search")
+    def search(q: str = Query(..., min_length=2, max_length=200), user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Find your fields by name, address, or coordinates, plus matching places to jump to on the map."""
+        mine = accounts.fields_for(user["id"])
+        fields = [f for f in store.list_fields(True) if f["id"] in mine]
+        return mapsearch.search(q, fields, geocoder)
 
     @app.get("/api/fields/{field_id}")
     def get_field(field_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:

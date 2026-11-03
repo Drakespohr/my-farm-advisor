@@ -185,6 +185,22 @@ uv venv && uv pip install -e '.[dev]'      # or: python -m venv .venv && pip ins
 .venv/bin/fieldmonitor serve            # http://127.0.0.1:8765
 ```
 
+### Finding a field on the map
+
+The search bar at the top of the map is always there. Type any of:
+
+- a field name (`north 80`): your matching fields;
+- coordinates: `40.9245, -98.348`, `40.9245 N, 98.348 W`, `40°55'28"N 98°20'53"W`, or GIS order
+  `-98.348, 40.9245`. If you drop the minus sign on a US longitude, it also offers the west point;
+- a street address (`1234 Road 12, Aurora NE`): US Census Bureau geocoder;
+- a town, road, or landmark: OpenStreetMap Nominatim (US only; set
+  `FIELD_MONITOR_GEOCODE_COUNTRIES` to change, empty for worldwide).
+
+Results list **your fields first**: the field the point falls in, then fields within 3 miles (by
+edge distance), then name matches. Tap a field to open it; tap a place to drop a pin there.
+Only your own and shared fields are searched. Coordinates and field names work offline; if the
+address services are down, the search says so and still shows field matches.
+
 ### Mapping a field (drone-mission style)
 
 1. Press **＋ Map a new field**. It opens automatically when a farm has no fields yet.
@@ -330,7 +346,8 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | GET/PATCH | `/api/fields/{id}` | Read / edit name, crop, notes, archived (boundaries are immutable) |
 | POST | `/api/fields/{id}/redraw` | Save an edited boundary as a new field version; archives the old one |
 | POST | `/api/fields/{id}/sync` | Check for new imagery now (otherwise automatic every 12 h) |
-| GET | `/api/geocode?q=` | Place search for the mapper (`lat, lon` or OpenStreetMap Nominatim) |
+| GET | `/api/search?q=` | Map search: your fields (inside / within 3 mi / by name) plus places (coordinates, US Census addresses, Nominatim) |
+| GET | `/api/geocode?q=` | Places only (older clients) |
 | GET | `/api/fields/{id}/scenes?start&end&max_cloud` | Available scenes and whether each is processed |
 | POST | `/api/fields/{id}/process` | Fetch a specific date range `{start, end, max_cloud}` → poll `/api/jobs/{job}` |
 | GET | `/api/fields/{id}/observations` | All observations with stats and provenance |
