@@ -87,7 +87,7 @@ def test_analysis_endpoints(client):
 def test_static_ui_served(client):
     c, _ = client
     r = c.get("/")
-    assert r.status_code == 200 and "Field Monitor" in r.text
+    assert r.status_code == 200 and "Overacre" in r.text
     assert c.get("/vendor/leaflet/leaflet.js").status_code == 200
 
 

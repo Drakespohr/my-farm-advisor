@@ -47,7 +47,7 @@
     const card = el("div", { class: "auth-card card" });
     const render = () => {
       card.replaceChildren();
-      card.append(el("h1", { text: "Field Monitor" }), el("p", { class: "muted", text: "Satellite field monitoring and a marketplace for ag businesses." }));
+      card.append(el("h1", { text: FM.appName || "Overacre" }), el("p", { class: "muted", text: FM.tagline || "Satellite field monitoring and a marketplace for ag businesses." }));
       card.append(el("div", { class: "seg" },
         el("button", { type: "button", class: mode === "login" ? "on" : "", text: "Log in", onclick: () => { mode = "login"; render(); } }),
         el("button", { type: "button", class: mode === "signup" ? "on" : "", text: "Sign up", onclick: () => { mode = "signup"; render(); } })));

@@ -1,4 +1,10 @@
-# Field Monitor
+# Overacre
+
+_Watch every acre. Trade with your neighbors._
+
+> Working name. The product name lives in `APP_NAME` in `fieldmonitor/__init__.py`
+> (plus the default `<title>`/brand text in `static/index.html`); the code package,
+> folder, and `fieldmonitor` command keep their technical names.
 
 Satellite field monitoring for farms. Outline a field on a satellite map the way you plan a
 drone mapping mission, or import a KML/KMZ/GeoJSON boundary, and the field keeps itself up to date.

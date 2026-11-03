@@ -2,6 +2,10 @@
 
 __version__ = "0.1.0"
 
+# Product name shown to users (the code package stays `fieldmonitor`).
+APP_NAME = "Overacre"
+APP_TAGLINE = "Watch every acre. Trade with your neighbors."
+
 # Bump whenever index math, masking, or resampling changes. Observations are stored
 # under their processing version so old results are never overwritten.
 PROCESSING_VERSION = "3"
