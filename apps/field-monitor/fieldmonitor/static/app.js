@@ -536,6 +536,7 @@
     $("share-panel").hidden = true;
     renderScore(f.score);
     loadWatch(f);
+    loadYield(f);
     renderSync();
     $("csv-link").href = `/api/fields/${encodeURIComponent(id)}/timeseries.csv`;
     map.fitBounds(L.geoJSON(f.geometry).getBounds(), { padding: [30, 30], maxZoom: 16, animate: false });
@@ -1077,6 +1078,147 @@
     box.title = `Score out of 100 as of ${niceDate(sc.as_of)}. ${sc.method}.`;
     pts.append(el("li", { class: "cap-li", text: "Why this score:" }));
     for (const p of sc.points) pts.append(el("li", { text: p }));
+  }
+
+  // ---------- yield estimate --------------------------------------------------------
+  const METHOD_NAMES = {
+    harvest: "Harvested", count: "Field count", satellite: "Satellite vs. nearby cropland",
+    satellite_calibrated: "Satellite, calibrated on your farm", relative: "Satellite, relative only",
+  };
+  // Field-count inputs per crop. Lists accept several spots, e.g. "31, 29, 30".
+  const COUNT_FORMS = {
+    corn: [
+      ["row_in", "Row spacing (in)", 30], ["row_ft", "Row length counted (ft)", 17.42],
+      ["ears", "Ears in that length (each spot)", "", true], ["kernel_rows", "Kernel rows per ear", "", true],
+      ["kernels_per_row", "Kernels per row", "", true],
+      ["kernels_per_bu", "Kernels per bushel", 90000, false, [[80000, "80,000 · good grain fill"], [90000, "90,000 · normal"], [100000, "100,000 · stress"]]],
+    ],
+    soybean: [
+      ["row_in", "Row spacing (in)", 30], ["row_ft", "Row length counted (ft)", 17.42],
+      ["plants", "Plants in that length (each spot)", "", true], ["pods_per_plant", "Pods per plant", "", true],
+      ["seeds_per_pod", "Seeds per pod", 2.5], ["seeds_per_lb", "Seeds per pound", 3000, false, [[3000, "3,000 · normal"], [3500, "3,500 · small seed / late stress"]]],
+    ],
+    wheat: [
+      ["row_in", "Row spacing (in)", 7.5], ["row_ft", "Row length counted (ft)", 3],
+      ["heads", "Heads in that length (each spot)", "", true], ["kernels_per_head", "Kernels per head", 22, true],
+      ["kernels_per_lb", "Kernels per pound", 15000],
+    ],
+  };
+  const nums = (v) => String(v).split(/[\s,;]+/).filter(Boolean).map(Number);
+
+  function yieldTile(y) {
+    const box = $("yield-tile");
+    box.replaceChildren();
+    if (y.bu_ac != null) {
+      box.append(el("div", { class: "big" }, `${Math.round(y.bu_ac)} `, el("small", { text: "bu/ac" })),
+        el("div", { class: "sub", text: y.method === "harvest" ? `Harvested ${y.year}` : `${y.low}–${y.high} · ${METHOD_NAMES[y.method] || ""}` }));
+    } else {
+      box.append(el("div", { class: "big muted", text: "—" }), el("div", { class: "sub", text: y.label }));
+    }
+  }
+
+  function yieldWhy(y) {
+    const li = [];
+    const s = y.signal || {};
+    if (s.rel) {
+      const pct = Math.round((s.rel - 1) * 100);
+      li.push(`Peak canopy ${niceDate(s.window[0])}${s.window[1] !== s.window[0] ? `–${niceDate(s.window[1])}` : ""} (${s.images} image${s.images > 1 ? "s" : ""}): NDVI ${fmt(s.field_ndvi)} vs ${fmt(s.area_ndvi)} for cropland within 2 km, ${pct === 0 ? "on par" : `${Math.abs(pct)}% ${pct > 0 ? "greener" : "less green"}`}.`);
+      if (s.stage === "early") li.push("Nearby crops haven't peaked yet, so this can still move a lot.");
+    } else if (s.stage === "none") li.push(`No in-season images for ${y.year} yet.`);
+    if (y.expected) li.push(`Expected yield ${y.expected.bu_ac} bu/ac${y.expected.year !== y.year ? ` (entered for ${y.expected.year})` : ""}.`);
+    if (y.calibration) li.push(`Calibrated on ${y.calibration.n} of your field-years: each 1% greener than neighbors ≈ ${fmt(y.calibration.k, 1)}% more yield${y.calibration.loo_rmse_bu != null ? `; typical miss ±${Math.round(y.calibration.loo_rmse_bu)} bu/ac` : ""}.`);
+    else if (y.method === "satellite") li.push("Rough until calibrated: it assumes yield moves one-for-one with greenness, which understates differences. Record harvests to calibrate (3+ field-years).");
+    if (y.method === "count" && y.satellite) li.push(`Satellite says about ${y.satellite.bu_ac} bu/ac (${y.satellite.low}–${y.satellite.high}).`);
+    if (y.count && y.method !== "count") li.push(`Last field count: ${y.count.bu_ac} bu/ac on ${niceDate(y.count.date)}.`);
+    return li;
+  }
+
+  function yieldForm(f, y, kind) {
+    const form = el("form", {});
+    const msg = el("p", { class: "small", role: "status" });
+    const save = async (body) => {
+      try {
+        renderYield(await api(`/api/fields/${encodeURIComponent(f.id)}/yield/records`, { method: "POST", body: JSON.stringify({ year: y.year, ...body }) }), f);
+      } catch (err) { msg.textContent = err.message; }
+    };
+    if (kind === "expected" || kind === "harvest") {
+      const inp = el("input", { type: "number", min: "1", max: "400", step: "0.1", required: "", value: kind === "expected" && y.expected ? y.expected.bu_ac : "" });
+      form.append(el("label", {}, kind === "expected" ? `Expected yield for ${y.year} (bu/ac), e.g. your APH` : `Harvested yield ${y.year} (bu/ac, field average)`, inp),
+        el("button", { class: "btn primary", type: "submit", text: "Save" }), msg);
+      form.addEventListener("submit", (e) => { e.preventDefault(); save({ kind, bu_ac: Number(inp.value) }); });
+      return form;
+    }
+    const spec = COUNT_FORMS[y.crop];
+    const grid = el("div", { class: "grid2" });
+    const inputs = {};
+    for (const [key, label, def, list, options] of spec) {
+      const inp = options
+        ? el("select", {}, options.map(([v, t]) => el("option", { value: String(v), text: t, ...(v === def ? { selected: "" } : {}) })))
+        : el("input", { type: list ? "text" : "number", step: "any", value: String(def), inputmode: "decimal", placeholder: list ? "e.g. 31, 29, 30" : "" });
+      inputs[key] = [inp, list];
+      grid.append(el("label", { class: "small" }, label, inp));
+    }
+    const preview = el("div", { class: "preview", "aria-live": "polite", text: "Enter your counts to see bu/ac" });
+    let t = null;
+    const body = () => Object.fromEntries(Object.entries(inputs).filter(([, [inp]]) => inp.value !== "")
+      .map(([k, [inp, list]]) => [k, list ? nums(inp.value) : Number(inp.value)]));
+    form.addEventListener("input", () => {
+      clearTimeout(t);
+      t = setTimeout(async () => {
+        try {
+          const r = await api("/api/yield/count", { method: "POST", body: JSON.stringify({ crop: y.crop, inputs: body() }) });
+          preview.textContent = `${r.bu_ac} bu/ac (${r.low}–${r.high})`;
+        } catch (err) { preview.textContent = err.message; }
+      }, 300);
+    });
+    form.addEventListener("submit", (e) => { e.preventDefault(); save({ kind: "count", inputs: body() }); });
+    form.append(el("p", { class: "small muted", text: "Count several spots across the field (not the edges). The default length is 1/1000 acre for that row spacing." }),
+      grid, preview, el("button", { class: "btn primary", type: "submit", text: "Save count" }), msg);
+    for (const [k, [inp]] of Object.entries(inputs)) {
+      if (k === "row_in") inp.addEventListener("change", () => { if (y.crop !== "wheat") inputs.row_ft[0].value = (522.72 / Number(inp.value)).toFixed(2); });
+    }
+    return form;
+  }
+
+  function renderYield(y, f) {
+    yieldTile(y);
+    const p = $("yield-panel");
+    p.replaceChildren();
+    p.hidden = false;
+    const chips = el("div", { class: "chips" });
+    if (y.method) chips.append(el("span", { class: `ychip ${y.method === "harvest" ? "measured" : y.confidence === "field count" ? "count" : y.confidence}`, text: METHOD_NAMES[y.method] }));
+    if (y.confidence && y.method !== "harvest") chips.append(el("span", { class: "ychip", text: y.confidence === "rough" ? "rough (±20%)" : y.confidence }));
+    p.append(el("h3", { text: `Yield estimate · ${y.year}${y.crop ? ` · ${y.crop}` : ""}` }), el("div", { class: "big", text: y.label }), chips);
+    const why = yieldWhy(y);
+    if (why.length) p.append(el("ul", { class: "bullets small" }, why.map((t) => el("li", { text: t }))));
+    if (f.my_role === "owner" && y.crop) {
+      const steps = y.next_steps || [];
+      const sec = (title, kind, open) => el("details", open ? { open: "" } : {}, el("summary", { text: title }), yieldForm(f, y, kind));
+      if (!y.harvest) {
+        p.append(sec(y.expected ? `Expected yield: ${y.expected.bu_ac} bu/ac (change)` : "Set expected yield (APH) to see bushels", "expected", steps.includes("set_expected")));
+        p.append(sec("Count in the field (most accurate in season)", "count", false));
+      }
+      p.append(sec(y.harvest ? `Harvested: ${y.harvest.bu_ac} bu/ac (change)` : "Record harvest yield (calibrates future estimates)", "harvest", false));
+    } else if (!y.crop && f.my_role === "owner") {
+      p.append(el("p", { class: "small muted", text: "Set the crop (Manage → Edit name & crop) to corn, soybeans, or wheat." }));
+    }
+    p.append(el("details", {}, el("summary", { text: "How this is calculated" }),
+      el("ul", { class: "bullets small" },
+        el("li", { text: "Field count: ears × kernels ÷ kernels per bushel (corn); plants × pods × seeds ÷ seeds per lb ÷ 60 (soybeans); heads × kernels ÷ kernels per lb ÷ 60 (wheat)." }),
+        el("li", { text: "Satellite: expected yield × how green the field was at peak canopy vs. cropland within 2 km on the same images. Calibrated with your harvests once you have 3+ field-years." }),
+        ...(state.yieldSources || []).map((s) => el("li", {}, el("a", { href: s.url, target: "_blank", rel: "noopener", text: s.label }))))));
+  }
+
+  async function loadYield(f) {
+    $("yield-panel").hidden = true;
+    $("yield-tile").replaceChildren(el("div", { class: "sub", text: "Loading…" }));
+    try {
+      if (!state.yieldSources) state.yieldSources = (await api("/api/yield/methods")).sources;
+      const y = await api(`/api/fields/${encodeURIComponent(f.id)}/yield`);
+      if (state.field && state.field.id === f.id) renderYield(y, f);
+    } catch (err) {
+      $("yield-tile").replaceChildren(el("div", { class: "sub", text: "Estimate unavailable" }));
+    }
   }
 
   // ---------- watch list & disease reports --------------------------------------

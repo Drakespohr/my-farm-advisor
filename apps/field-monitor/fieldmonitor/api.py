@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from . import APP_NAME, APP_TAGLINE, APP_TAGLINE_NO_MARKET, PROCESSING_VERSION, marketplace_enabled, __version__, analysis, diagnose, qa, score as scoring
 from . import search as mapsearch
+from . import yields
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
 from .news import News
@@ -66,6 +67,17 @@ class FieldPatch(BaseModel):
     notes: str | None = None
     archived: bool | None = None
     showcase: bool | None = None
+
+
+class YieldRecordIn(BaseModel):
+    kind: str = Field(..., pattern="^(expected|harvest|count)$",
+                      description="expected (e.g. APH), harvest (actual), or count (field yield-component count)")
+    year: int = Field(..., ge=2015, le=2100)
+    bu_ac: float | None = Field(None, gt=0, le=400, description="For expected and harvest")
+    crop: str | None = Field(None, max_length=40, description="Defaults to the field's crop")
+    on_date: date | None = Field(None, description="Count or harvest date (defaults to today)")
+    inputs: dict[str, Any] | None = Field(None, description="Field-count inputs for kind=count (see /api/yield/methods)")
+    notes: str | None = Field(None, max_length=500)
 
 
 class ProcessIn(BaseModel):
@@ -151,6 +163,35 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         if need == "owner" and role != "owner":
             raise HTTPException(403, "Only the field's owner can do that.")
         return {**f, "my_role": role}
+
+    # ---- yield -----------------------------------------------------------------
+    def farm_calibration(user: dict[str, Any], kind: str) -> dict[str, Any] | None:
+        """Fit on every field this user owns (their own farm's harvests)."""
+        items = []
+        for fid, role in accounts.fields_for(user["id"]).items():
+            if role != "owner":
+                continue
+            recs = store.list_yield_records(fid)
+            if not any(r["kind"] == "harvest" for r in recs):
+                continue
+            try:
+                items.append((store.get_field(fid), qa.classify(store.list_observations(fid)), recs))
+            except KeyError:
+                continue
+        return yields.calibrate(yields.farm_calibration_points(items, kind))
+
+    def yield_for(f: dict[str, Any], user: dict[str, Any], year: int | None = None) -> dict[str, Any]:
+        obs = qa.classify(store.list_observations(f["id"]))
+        recs = store.list_yield_records(f["id"])
+        today = date.today()
+        if year is None:
+            years = yields.season_years(obs)
+            year = today.year if (not years or years[0] == today.year) else years[0]
+        kind = yields.crop_kind(f.get("crop"))
+        cal = farm_calibration(user, kind) if kind else None
+        return yields.estimate(f, obs, recs, year, cal, today)
+
+    app.state.yield_for = yield_for
 
     def ok_obs(field_id: str) -> list[dict[str, Any]]:
         """Clear observations that passed QA (no haze or one-pass artifacts)."""
@@ -316,6 +357,53 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         fields = [f for f in store.list_fields(True) if f["id"] in mine]
         near = (lat, lon) if lat is not None and lon is not None else None
         return mapsearch.suggest(q, fields, geocoder, near)
+
+    @app.get("/api/yield/methods")
+    def yield_methods(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Field-count inputs, defaults, and sources for the yield calculator."""
+        return {"defaults": yields.DEFAULTS, "count_band": yields.COUNT_BAND, "sources": yields.SOURCES,
+                "uncalibrated_band": yields.UNCALIBRATED_BAND, "min_calibration_points": yields.MIN_CALIBRATION_POINTS}
+
+    @app.get("/api/fields/{field_id}/yield")
+    def field_yield(field_id: str, year: int | None = Query(None, ge=2015, le=2100),
+                    user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        f = field_or_404(field_id, user)
+        out = yield_for(f, user, year)
+        out["records"] = store.list_yield_records(field_id) if f["my_role"] == "owner" else []
+        return out
+
+    @app.post("/api/fields/{field_id}/yield/records", status_code=201)
+    def add_yield_record(field_id: str, body: YieldRecordIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        f = field_or_404(field_id, user, "owner")
+        crop = body.crop or f.get("crop")
+        kind = yields.crop_kind(crop)
+        when = (body.on_date or date.today()).isoformat()
+        rec: dict[str, Any] = {"kind": body.kind, "year": body.year, "crop": kind, "date": when, "notes": body.notes,
+                               "by": user["id"]}
+        if body.kind == "count":
+            if not body.inputs:
+                raise HTTPException(400, "Send the field-count inputs.")
+            try:
+                res = yields.count_estimate(crop or "", body.inputs)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from None
+            rec.update(bu_ac=res["bu_ac"], low=res["low"], high=res["high"], parts=res["parts"], inputs=body.inputs)
+        else:
+            if body.bu_ac is None:
+                raise HTTPException(400, "Enter bushels per acre.")
+            if kind is None:
+                raise HTTPException(400, "Set the field's crop (corn, soybeans, or wheat) first.")
+            rec["bu_ac"] = round(body.bu_ac, 1)
+        store.add_yield_record(field_id, rec)
+        return field_yield(field_id, body.year, user)
+
+    @app.post("/api/yield/count")
+    def yield_count_preview(body: dict[str, Any], user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Calculate a field count without saving it (for the calculator's live preview)."""
+        try:
+            return yields.count_estimate(str(body.get("crop") or ""), dict(body.get("inputs") or {}))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
 
     @app.get("/api/fields/{field_id}")
     def get_field(field_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
@@ -553,7 +641,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return field_score_for(field_id, as_of)
 
     app.include_router(make_router(accounts, store, require_user, lambda fid: field_score_for(fid)))
-    app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices))
+    app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices,
+                                     yield_for=lambda f, user: yield_for(f, user)))
 
     @app.exception_handler(FileExistsError)
     def conflict(_: Any, exc: FileExistsError) -> JSONResponse:
