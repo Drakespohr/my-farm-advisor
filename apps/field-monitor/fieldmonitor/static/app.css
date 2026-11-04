@@ -111,7 +111,7 @@ body.mapping .detail, body.mapping .map-legend { display: none !important; }
 .search-results {
   position: absolute; top: 44px; left: 0; width: min(520px, 100%); margin: 0; padding: 4px; list-style: none;
   background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.25);
-  max-height: 260px; overflow-y: auto;
+  max-height: min(440px, 65vh); overflow-y: auto;
 }
 .search-results button {
   width: 100%; text-align: left; font: inherit; font-size: 13px; color: var(--text-primary); background: none;
@@ -565,3 +565,12 @@ label > input[type=text], label > input[type=email], label > input[type=password
 .chip.risk-high { color: var(--poor); } .chip.risk-moderate { color: var(--fair); } .chip.risk-low { color: var(--good); }
 @media (max-width: 820px) { .fc-trend .spark { display: block; width: 140px; } }
 .fc-trend.down .spark polyline { stroke: var(--poor); }
+
+/* Search suggestions: icon + two lines, like a maps search bar */
+.search-results .sugg { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; }
+.search-results .sugg-icon { width: 18px; flex: none; text-align: center; color: var(--text-muted); line-height: 20px; }
+.search-results .sugg-field .sugg-icon { color: var(--good); font-weight: 700; }
+.search-results .sugg-text { display: flex; flex-direction: column; min-width: 0; }
+.search-results .sugg-main { font-size: 14px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-results .sugg-sub { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-results .sugg-credit { font-size: 11px; color: var(--text-muted); text-align: right; padding: 4px 10px 2px; }

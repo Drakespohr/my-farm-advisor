@@ -150,6 +150,10 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     geocoder = mapsearch.Geocoder(f"my-farm-advisor-field-monitor/{__version__}",
                                   countries=os.getenv("FIELD_MONITOR_GEOCODE_COUNTRIES", "us"))
     app.state.geocoder = geocoder
+    # Google Places suggestions are used only when the owner sets their own key in the environment.
+    _gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+    app.state.google_places = mapsearch.GooglePlaces(
+        _gkey, daily_limit=int(os.getenv("GOOGLE_PLACES_DAILY_LIMIT", "1000"))) if _gkey else None
 
     def field_or_404(field_id: str, user: dict[str, Any], need: str = "viewer") -> dict[str, Any]:
         """Return the field if `user` may see it (404 otherwise, so ids don't leak)."""
@@ -354,12 +358,27 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     @app.get("/api/search/suggest")
     def search_suggest(q: str = Query(..., min_length=1, max_length=200), lat: float | None = Query(None, ge=-90, le=90),
                        lon: float | None = Query(None, ge=-180, le=180),
+                       session: str | None = Query(None, pattern=r"^[A-Za-z0-9-]{8,64}$"),
                        user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
-        """Type-ahead suggestions for the map search (your fields, coordinates, Photon places near the map view)."""
+        """Up to 5 suggestions while typing: coordinates, your fields, then Google (or OpenStreetMap) addresses."""
         mine = accounts.fields_for(user["id"])
         fields = [f for f in store.list_fields(True) if f["id"] in mine]
         near = (lat, lon) if lat is not None and lon is not None else None
-        return mapsearch.suggest(q, fields, geocoder, near)
+        return mapsearch.suggest(q, fields, geocoder, near, app.state.google_places, session)
+
+    @app.get("/api/search/place")
+    def search_place(id: str = Query(..., min_length=10, max_length=300), session: str | None = Query(None, pattern=r"^[A-Za-z0-9-]{8,64}$"),
+                     user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Where a Google suggestion is (called once when you pick it; this ends the billing session)."""
+        gp = app.state.google_places
+        if gp is None:
+            raise HTTPException(404, "Google Places is not configured.")
+        try:
+            return gp.details(id, session)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except (httpx.HTTPError, KeyError, TypeError) as exc:
+            raise HTTPException(502, f"Couldn't look up that place ({exc.__class__.__name__}).") from None
 
     @app.get("/api/yield/methods")
     def yield_methods(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:

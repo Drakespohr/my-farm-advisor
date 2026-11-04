@@ -126,8 +126,9 @@ PHOTON_AURORA = [
 def test_suggest_places_from_photon_us_only_and_cached():
     g = geo(photon=PHOTON_AURORA)
     out = suggest("Auro", FIELDS, g, near=(40.92, -98.34))
-    assert [p["name"] for p in out["places"]] == ["Aurora, Hamilton County, Nebraska"]
-    assert out["places"][0]["bbox"] == [[40.85, -98.03], [40.88, -97.98]]
+    assert out["source"] == "OpenStreetMap"
+    assert [(i["main"], i["secondary"]) for i in out["items"]] == [("Aurora", "Hamilton County, Nebraska")]
+    assert out["items"][0]["bbox"] == [[40.85, -98.03], [40.88, -97.98]]
     (host, params), = g.http_get.calls
     assert host == "photon" and params["bbox"] and params["lat"] == 40.92
     suggest("auro", FIELDS, g, near=(40.92, -98.34))
@@ -138,12 +139,93 @@ def test_suggest_places_from_photon_us_only_and_cached():
 def test_suggest_fields_and_coordinates_without_network():
     g = geo(fail=("photon", "census", "nominatim"))
     out = suggest("pi", FIELDS, g)  # 2 chars: fields only, no network
-    assert [f["name"] for f in out["fields"]] == ["Home Pivot"] and g.http_get.calls == []
+    assert [i["main"] for i in out["items"]] == ["Home Pivot"] and g.http_get.calls == []
     out = suggest("40.9225, -98.3475", FIELDS, g)
-    assert out["places"][0]["kind"] == "coordinates" and out["fields"][0]["id"] == "north-80"
-    assert suggest("40.92,", FIELDS, g)["places"] == [] and g.http_get.calls == []  # half-typed: wait, no geocoding
+    assert out["items"][0]["type"] == "coordinates" and out["items"][1]["id"] == "north-80"
+    assert suggest("40.92,", FIELDS, g)["items"] == [] and g.http_get.calls == []  # half-typed: wait, no geocoding
     out = suggest("Sandhills", FIELDS, g)
-    assert out["fields"][0]["id"] == "far" and out["error"]  # Photon down: fields still suggested
+    assert out["items"][0]["id"] == "far" and out["error"]  # address service down: fields still suggested
+
+
+# ---- Google Places (fake HTTP; the real key lives only in the owner's environment) -------
+
+GOOGLE_AUTOCOMPLETE = {"suggestions": [
+    {"placePrediction": {"placeId": f"ChIJplace{i:04d}xyz", "text": {"text": f"{1200 + i} Road 12, Aurora, NE, USA"},
+                         "structuredFormat": {"mainText": {"text": f"{1200 + i} Road 12"}, "secondaryText": {"text": "Aurora, NE, USA"}}}}
+    for i in range(6)
+] + [{"queryPrediction": {"text": {"text": "road 12 near me"}}}]}
+
+
+class FakeGoogle:
+    def __init__(self, reject_region=False, fail=False):
+        self.posts, self.gets, self.reject_region, self.fail = [], [], reject_region, fail
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.posts.append((url, json, headers))
+        req = httpx.Request("POST", url)
+        if self.fail:
+            raise httpx.ConnectError("down")
+        if self.reject_region and "includedRegionCodes" in json:
+            return httpx.Response(400, json={"error": {"message": "Unknown name includedRegionCodes"}}, request=req)
+        return httpx.Response(200, json=GOOGLE_AUTOCOMPLETE, request=req)
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.gets.append((url, params, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url), json={
+            "id": "ChIJplace0000xyz", "formattedAddress": "1200 Road 12, Aurora, NE 68818, USA",
+            "location": {"latitude": 40.93, "longitude": -98.0},
+            "viewport": {"low": {"latitude": 40.92, "longitude": -98.01}, "high": {"latitude": 40.94, "longitude": -97.99}}})
+
+
+def gplaces(fake, limit=1000):
+    from fieldmonitor.search import GooglePlaces
+    return GooglePlaces("test-key", daily_limit=limit, http_post=fake.post, http_get=fake.get)
+
+
+def test_google_gives_five_suggestions_with_session_and_bias():
+    fake = FakeGoogle()
+    out = suggest("1200 road 12", FIELDS, geo(), near=(40.9, -98.3), google=gplaces(fake), session_token="abc12345-session")
+    assert out["source"] == "Google" and len(out["items"]) == 5
+    assert out["items"][0] == {"type": "place", "place_id": "ChIJplace0000xyz", "main": "1200 Road 12",
+                               "secondary": "Aurora, NE, USA", "name": "1200 Road 12, Aurora, NE, USA", "source": "Google"}
+    url, body, headers = fake.posts[0]
+    assert url.endswith("places:autocomplete") and headers["X-Goog-Api-Key"] == "test-key"
+    assert body["input"] == "1200 road 12" and body["sessionToken"] == "abc12345-session"
+    assert body["includedRegionCodes"] == ["us"] and body["locationBias"]["circle"]["center"] == {"latitude": 40.9, "longitude": -98.3}
+
+
+def test_fields_take_at_most_two_of_five_slots():
+    fields = FIELDS + [{"id": "road-12-north", "name": "Road 12 North", "geometry": square(-98.2, 40.9)},
+                       {"id": "road-12-south", "name": "Road 12 South", "geometry": square(-98.2, 40.8)},
+                       {"id": "old-road-12", "name": "Old Road 12", "geometry": square(-98.2, 40.7)}]
+    out = suggest("road 12", fields, geo(), google=gplaces(FakeGoogle()))
+    kinds = [i["type"] for i in out["items"]]
+    assert kinds == ["field", "field", "place", "place", "place"]
+    assert [i["main"] for i in out["items"][:2]] == ["Road 12 North", "Road 12 South"]  # "starts with" first
+
+
+def test_google_details_ends_session_and_returns_location():
+    fake = FakeGoogle()
+    d = gplaces(fake).details("ChIJplace0000xyz", "abc12345-session")
+    url, params, headers = fake.gets[0]
+    assert url.endswith("/places/ChIJplace0000xyz") and params == {"sessionToken": "abc12345-session"}
+    assert headers["X-Goog-FieldMask"] == "id,formattedAddress,location,viewport"
+    assert (d["lat"], d["lon"]) == (40.93, -98.0) and d["bbox"] == [[40.92, -98.01], [40.94, -97.99]]
+    with pytest.raises(ValueError):
+        gplaces(fake).details("../../etc", None)
+
+
+def test_google_region_filter_retry_limit_and_fallback():
+    fake = FakeGoogle(reject_region=True)
+    g = gplaces(fake)
+    assert len(suggest("1200 road", FIELDS, geo(), google=g)["items"]) == 5
+    assert "includedRegionCodes" not in fake.posts[-1][1]  # retried without the filter
+    # Daily cap: the 2nd call falls back to OpenStreetMap instead of spending more.
+    capped = gplaces(FakeGoogle(), limit=1)
+    assert suggest("aurora a", FIELDS, geo(photon=PHOTON_AURORA), google=capped)["source"] == "Google"
+    assert suggest("aurora b", FIELDS, geo(photon=PHOTON_AURORA), google=capped)["source"] == "OpenStreetMap"
+    down = suggest("aurora", FIELDS, geo(photon=PHOTON_AURORA), google=gplaces(FakeGoogle(fail=True)))
+    assert down["source"] == "OpenStreetMap" and down["items"][0]["main"] == "Aurora"
 
 
 def test_suggest_endpoint(client):  # noqa: F811
@@ -152,5 +234,20 @@ def test_suggest_endpoint(client):  # noqa: F811
     c.post("/api/fields", json={"geojson": gj, "auto_sync": False})
     c.app.state.geocoder.http_get = FakeHTTP(photon=PHOTON_AURORA)
     r = c.get("/api/search/suggest", params={"q": "nor", "lat": 40.9, "lon": -98.3}).json()
-    assert r["fields"][0]["name"] == "North 80"
+    assert r["items"][0]["main"] == "North 80" and r["items"][0]["type"] == "field"
     assert c.get("/api/search/suggest", params={"q": "x", "lat": 200}).status_code == 422
+    assert c.get("/api/search/suggest", params={"q": "nor", "session": "bad token!"}).status_code == 422
+    assert c.get("/api/search/place", params={"id": "ChIJplace0000xyz"}).status_code == 404  # no key configured
+    c.app.state.google_places = gplaces(FakeGoogle())
+    r = c.get("/api/search/suggest", params={"q": "1200 road", "session": "abc12345-session"}).json()
+    assert r["source"] == "Google" and len(r["items"]) == 5
+    p = c.get("/api/search/place", params={"id": r["items"][0]["place_id"], "session": "abc12345-session"}).json()
+    assert p["lat"] == 40.93
+
+
+def test_house_number_alone_asks_for_addresses():
+    fake = FakeGoogle()
+    out = suggest("120", FIELDS, geo(), google=gplaces(fake))
+    assert len(out["items"]) == 5 and fake.posts  # "120" is a house number, not coordinates
+    fake2 = FakeGoogle()
+    assert suggest("40.9", FIELDS, geo(), google=gplaces(fake2))["items"] == [] and not fake2.posts

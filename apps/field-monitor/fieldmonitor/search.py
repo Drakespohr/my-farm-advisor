@@ -12,16 +12,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import threading
-from collections import OrderedDict
 import time
+from collections import OrderedDict
 from typing import Any, Callable, Iterable, Optional
 
 import httpx
 from shapely.geometry import Point, shape
 from shapely.ops import nearest_points
+
+log = logging.getLogger(__name__)
 
 NEAR_MILES = 3.0
 PHOTON_URL = "https://photon.komoot.io/api/"
@@ -234,26 +237,156 @@ def _photon_label(pr: dict[str, Any]) -> str:
     return ", ".join(dict.fromkeys(p for p in parts if p)) or "Unnamed place"
 
 
+MAX_SUGGESTIONS = 5
+MAX_FIELD_SUGGESTIONS = 2  # when addresses are also available, fields take at most 2 of the 5 slots
+
+
+class GooglePlaces:
+    """Google Places API (New) autocomplete + place details, called from the server so the key
+    stays private. Read the key from GOOGLE_MAPS_API_KEY; never store it in code.
+
+    Billing: autocomplete requests are grouped into a session by `session_token` (a UUID the
+    browser makes per search). Picking a suggestion calls Place Details with the same token, which
+    ends the session; the next search uses a new token. A daily request cap protects the bill;
+    past it, suggestions fall back to the free OpenStreetMap service.
+    """
+
+    AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete"
+    DETAILS_URL = "https://places.googleapis.com/v1/places/{place_id}"
+    DETAILS_FIELDS = "id,formattedAddress,location,viewport"
+
+    def __init__(self, api_key: str, daily_limit: int = 1000, region: str = "us",
+                 http_post: Callable[..., httpx.Response] = httpx.post,
+                 http_get: Callable[..., httpx.Response] = httpx.get) -> None:
+        self.api_key = api_key
+        self.daily_limit = daily_limit
+        self.region = region
+        self.http_post = http_post
+        self.http_get = http_get
+        self._lock = threading.Lock()
+        self._day = ""
+        self._count = 0
+        self._region_filter_ok = True  # dropped if Google rejects includedRegionCodes
+
+    def _spend(self) -> bool:
+        today = time.strftime("%Y-%m-%d")
+        with self._lock:
+            if today != self._day:
+                self._day, self._count = today, 0
+            if self._count >= self.daily_limit:
+                return False
+            self._count += 1
+            return True
+
+    @property
+    def used_today(self) -> int:
+        return self._count if self._day == time.strftime("%Y-%m-%d") else 0
+
+    def autocomplete(self, q: str, session_token: Optional[str], near: Optional[tuple[float, float]]) -> list[dict[str, Any]]:
+        if not self._spend():
+            raise QuotaExceeded("Daily Google suggestion limit reached")
+        body: dict[str, Any] = {"input": q, "languageCode": "en"}
+        if session_token:
+            body["sessionToken"] = session_token
+        if self.region and self._region_filter_ok:
+            body["includedRegionCodes"] = [self.region]
+        if near:
+            body["locationBias"] = {"circle": {"center": {"latitude": near[0], "longitude": near[1]}, "radius": 50000.0}}
+        headers = {"X-Goog-Api-Key": self.api_key, "Content-Type": "application/json"}
+        r = self.http_post(self.AUTOCOMPLETE_URL, json=body, headers=headers, timeout=5.0)
+        if r.status_code == 400 and "includedRegionCodes" in body:
+            # Older/changed API versions may reject the region filter: retry once without it.
+            self._region_filter_ok = False
+            body.pop("includedRegionCodes")
+            r = self.http_post(self.AUTOCOMPLETE_URL, json=body, headers=headers, timeout=5.0)
+        r.raise_for_status()
+        out = []
+        for sug in r.json().get("suggestions", []):
+            pp = sug.get("placePrediction")
+            if not pp or not pp.get("placeId"):
+                continue  # query predictions ("pizza near…") have no place to jump to
+            sf = pp.get("structuredFormat") or {}
+            full = (pp.get("text") or {}).get("text") or ""
+            main = (sf.get("mainText") or {}).get("text") or full.split(",")[0]
+            secondary = (sf.get("secondaryText") or {}).get("text") or ", ".join(p.strip() for p in full.split(",")[1:])
+            out.append({"type": "place", "place_id": pp["placeId"], "main": main, "secondary": secondary,
+                        "name": full or f"{main}, {secondary}", "source": "Google"})
+        return out
+
+    def details(self, place_id: str, session_token: Optional[str]) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{10,300}", place_id):
+            raise ValueError("Bad place id")
+        params = {"sessionToken": session_token} if session_token else None
+        r = self.http_get(self.DETAILS_URL.format(place_id=place_id), params=params, timeout=5.0,
+                          headers={"X-Goog-Api-Key": self.api_key, "X-Goog-FieldMask": self.DETAILS_FIELDS})
+        r.raise_for_status()
+        d = r.json()
+        loc = d["location"]
+        vp = d.get("viewport") or {}
+        lo, hi = vp.get("low"), vp.get("high")
+        bbox = [[lo["latitude"], lo["longitude"]], [hi["latitude"], hi["longitude"]]] if lo and hi else None
+        return {"name": d.get("formattedAddress") or "", "lat": float(loc["latitude"]), "lon": float(loc["longitude"]),
+                "bbox": bbox, "kind": "place", "source": "Google"}
+
+
+class QuotaExceeded(Exception):
+    pass
+
+
+def _photon_item(p: dict[str, Any]) -> dict[str, Any]:
+    main, _, rest = p["name"].partition(", ")
+    return {"type": "place", "main": main, "secondary": rest, "name": p["name"], "lat": p["lat"], "lon": p["lon"],
+            "bbox": p.get("bbox"), "source": p.get("source")}
+
+
+def _field_item(f: dict[str, Any]) -> dict[str, Any]:
+    why = {"inside": "the point is in this field", "near": f"{f.get('distance_mi')} mi away"}.get(f["match"], "")
+    bits = ["Your field", f.get("crop"), why]
+    return {"type": "field", "id": f["id"], "main": f["name"], "secondary": " · ".join(b for b in bits if b),
+            "bbox": f["bbox"], "match": f["match"]}
+
+
 def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
-            near: Optional[tuple[float, float]] = None) -> dict[str, Any]:
-    """Fast suggestions while typing: your fields by name, parsed coordinates, then Photon places."""
+            near: Optional[tuple[float, float]] = None, google: Optional[GooglePlaces] = None,
+            session_token: Optional[str] = None) -> dict[str, Any]:
+    """The 5 most likely things you're looking for, in one list, while you type.
+
+    Order: typed coordinates (and the field they land in), your fields whose name starts with /
+    contains the text, then addresses and places (Google Places if a key is set, otherwise
+    OpenStreetMap via Photon) to fill the 5 slots.
+    """
     q = q.strip()
-    out: dict[str, Any] = {"query": q, "fields": [], "places": [], "error": None}
+    out: dict[str, Any] = {"query": q, "items": [], "source": None, "error": None}
     if len(q) < 2:
         return out
     coords = parse_coords(q)
     if coords:
-        out["places"] = [{"name": f"{coords[0]:.6f}, {coords[1]:.6f}", "lat": coords[0], "lon": coords[1],
-                          "bbox": None, "kind": "coordinates", "source": None}]
-        out["fields"] = match_fields("", fields, [coords])[:3]
+        out["items"] = [{"type": "coordinates", "main": f"{coords[0]:.6f}, {coords[1]:.6f}", "secondary": "Coordinates",
+                         "name": f"{coords[0]:.6f}, {coords[1]:.6f}", "lat": coords[0], "lon": coords[1], "bbox": None}]
+        out["items"] += [_field_item(f) for f in match_fields("", fields, [coords])[:MAX_SUGGESTIONS - 1]]
         return out
-    out["fields"] = [f for f in match_fields(q, fields, []) if f["match"] == "name"][:4]
-    half_typed_coords = re.search(r"\d", q) and re.fullmatch(r"[-+\d.,\s°'\"NSEWnsew]+", q)
-    if len(q) >= 3 and not half_typed_coords:  # wait for complete coordinates instead of geocoding digits
-        try:
-            out["places"] = geocoder.photon(q, near)[:5]
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            out["error"] = f"Place suggestions unavailable ({exc.__class__.__name__}); press Enter to search."
+    ql = q.lower()
+    named = [f for f in match_fields(q, fields, []) if f["match"] == "name"]
+    named.sort(key=lambda f: (not f["name"].lower().startswith(ql), f["name"].lower()))  # "starts with" first
+    places: list[dict[str, Any]] = []
+    # "40.9" or "40.92," is coordinates mid-typing: wait. A plain number like "120" is the start of
+    # a house number, so it goes to the address service like any other text.
+    half_typed_coords = re.search(r"[.,°]", q) and re.fullmatch(r"[-+\d.,\s°'\"NSEWnsew]+", q)
+    if len(q) >= 3 and not half_typed_coords:
+        if google:
+            try:
+                places, out["source"] = google.autocomplete(q, session_token, near), "Google"
+            except QuotaExceeded:
+                log.warning("Google Places daily limit reached; using OpenStreetMap suggestions")
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                log.warning("Google Places autocomplete failed: %s", exc.__class__.__name__)
+        if not out["source"]:
+            try:
+                places, out["source"] = [_photon_item(p) for p in geocoder.photon(q, near)], "OpenStreetMap"
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+                out["error"] = f"Address suggestions unavailable ({exc.__class__.__name__}); press Search to look it up."
+    n_fields = min(len(named), MAX_FIELD_SUGGESTIONS if places else MAX_SUGGESTIONS)
+    out["items"] = [_field_item(f) for f in named[:n_fields]] + places[:MAX_SUGGESTIONS - n_fields]
     return out
 
 
