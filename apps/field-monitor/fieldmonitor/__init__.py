@@ -5,6 +5,15 @@ __version__ = "0.1.0"
 # Product name shown to users (the code package stays `fieldmonitor`).
 APP_NAME = "Overacre"
 APP_TAGLINE = "Watch every acre. Trade with your neighbors."
+APP_TAGLINE_NO_MARKET = "Watch every acre."
+
+
+def marketplace_enabled() -> bool:
+    """The marketplace is paused by default. Set FIELD_MONITOR_MARKETPLACE=1 to turn it back on.
+    Listings already in the database are kept either way."""
+    import os
+
+    return os.environ.get("FIELD_MONITOR_MARKETPLACE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # Bump whenever index math, masking, or resampling changes. Observations are stored
 # under their processing version so old results are never overwritten.

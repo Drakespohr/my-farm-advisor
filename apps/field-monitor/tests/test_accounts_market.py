@@ -13,6 +13,7 @@ H = {"X-Requested-With": "fieldmonitor"}
 @pytest.fixture()
 def app(store, monkeypatch):
     monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda *a, **k: ([], "test"))
+    monkeypatch.setenv("FIELD_MONITOR_MARKETPLACE", "1")  # these tests cover the marketplace itself
     return create_app(store, refresh_hours=0)
 
 
@@ -118,3 +119,16 @@ def test_showcase_shows_score_not_map(app, store):
     c.patch(f"/api/fields/{fid}", json={"showcase": True})
     prof = c.get(f"/api/users/{uid}").json()
     assert prof["showcase"][0]["name"] == "North" and "geometry" not in prof["showcase"][0]
+
+
+def test_marketplace_is_off_by_default(app, monkeypatch):
+    monkeypatch.delenv("FIELD_MONITOR_MARKETPLACE")
+    c = client(app)
+    r = c.post("/api/auth/register", json={"email": "m@example.com", "password": "correct horse 1", "name": "M", "roles": ["farmer"]})
+    assert r.status_code == 201
+    assert c.get("/api/health").json()["features"] == {"marketplace": False}
+    assert c.get("/api/listings").status_code == 404
+    assert c.post("/api/listings", json={"kind": "service", "category": "Spraying", "title": "Custom spraying", "description": "Ground rig, 120 ft boom"}).status_code == 404
+    assert c.get("/api/feed?section=market").status_code == 200
+    me = c.get("/api/me").json()["user"]["id"]
+    assert c.get(f"/api/users/{me}").json()["listings"] == []

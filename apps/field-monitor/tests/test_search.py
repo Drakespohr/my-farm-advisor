@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from fieldmonitor.search import Geocoder, match_fields, parse_coords, search
+from fieldmonitor.search import Geocoder, match_fields, parse_coords, search, suggest
 from tests.test_api import client, signup  # noqa: F401  (fixture)
 
 
@@ -19,16 +19,17 @@ FIELDS = [
 
 
 class FakeHTTP:
-    def __init__(self, census=None, nominatim=None, fail=()):
-        self.census, self.nominatim, self.fail, self.calls = census or [], nominatim or [], fail, []
+    def __init__(self, census=None, nominatim=None, photon=None, fail=()):
+        self.census, self.nominatim, self.photon, self.fail, self.calls = census or [], nominatim or [], photon or [], fail, []
 
     def __call__(self, url, params=None, headers=None, timeout=None):
-        host = "census" if "census.gov" in url else "nominatim"
+        host = "census" if "census.gov" in url else "photon" if "photon" in url else "nominatim"
         self.calls.append((host, params))
         assert headers and "User-Agent" in headers
         if host in self.fail:
             raise httpx.ConnectError("down")
-        body = ({"result": {"addressMatches": self.census}} if host == "census" else self.nominatim)
+        body = ({"result": {"addressMatches": self.census}} if host == "census"
+                else {"type": "FeatureCollection", "features": self.photon} if host == "photon" else self.nominatim)
         return httpx.Response(200, json=body, request=httpx.Request("GET", url))
 
 
@@ -111,3 +112,45 @@ def test_search_endpoint_only_returns_my_fields(client):  # noqa: F811
     signup(other, "neighbor@example.com", "Ned Neighbor")
     assert other.get("/api/search", params={"q": "40.9225, -98.3475"}).json()["fields"] == []
     assert c.get("/api/geocode", params={"q": "40.9, -98.3"}).json()[0]["lat"] == 40.9
+
+
+PHOTON_AURORA = [
+    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-98.004, 40.867]},
+     "properties": {"name": "Aurora", "county": "Hamilton County", "state": "Nebraska", "countrycode": "US",
+                    "extent": [-98.03, 40.88, -97.98, 40.85]}},
+    {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-104.8, 39.7]},
+     "properties": {"name": "Aurora", "state": "Ontario", "countrycode": "CA"}},  # dropped: not US
+]
+
+
+def test_suggest_places_from_photon_us_only_and_cached():
+    g = geo(photon=PHOTON_AURORA)
+    out = suggest("Auro", FIELDS, g, near=(40.92, -98.34))
+    assert [p["name"] for p in out["places"]] == ["Aurora, Hamilton County, Nebraska"]
+    assert out["places"][0]["bbox"] == [[40.85, -98.03], [40.88, -97.98]]
+    (host, params), = g.http_get.calls
+    assert host == "photon" and params["bbox"] and params["lat"] == 40.92
+    suggest("auro", FIELDS, g, near=(40.92, -98.34))
+    assert len(g.http_get.calls) == 1  # cached
+    assert all(c[0] != "nominatim" for c in g.http_get.calls)  # Nominatim forbids autocomplete
+
+
+def test_suggest_fields_and_coordinates_without_network():
+    g = geo(fail=("photon", "census", "nominatim"))
+    out = suggest("pi", FIELDS, g)  # 2 chars: fields only, no network
+    assert [f["name"] for f in out["fields"]] == ["Home Pivot"] and g.http_get.calls == []
+    out = suggest("40.9225, -98.3475", FIELDS, g)
+    assert out["places"][0]["kind"] == "coordinates" and out["fields"][0]["id"] == "north-80"
+    assert suggest("40.92,", FIELDS, g)["places"] == [] and g.http_get.calls == []  # half-typed: wait, no geocoding
+    out = suggest("Sandhills", FIELDS, g)
+    assert out["fields"][0]["id"] == "far" and out["error"]  # Photon down: fields still suggested
+
+
+def test_suggest_endpoint(client):  # noqa: F811
+    c, _ = client
+    gj = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"name": "North 80"}, "geometry": square(-98.35, 40.92)}]}
+    c.post("/api/fields", json={"geojson": gj, "auto_sync": False})
+    c.app.state.geocoder.http_get = FakeHTTP(photon=PHOTON_AURORA)
+    r = c.get("/api/search/suggest", params={"q": "nor", "lat": 40.9, "lon": -98.3}).json()
+    assert r["fields"][0]["name"] == "North 80"
+    assert c.get("/api/search/suggest", params={"q": "x", "lat": 200}).status_code == 422
