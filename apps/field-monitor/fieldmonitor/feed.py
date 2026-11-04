@@ -202,6 +202,7 @@ def make_router(
     field_access: Callable[[str, dict[str, Any]], dict[str, Any]],
     news: News,
     prices: Prices,
+    yield_for: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
 ) -> APIRouter:
     with accounts.db() as c:
         c.executescript(SCHEMA)
@@ -468,7 +469,17 @@ def make_router(
         return (roundup + rest)[:100]
 
     # ---- daily brief ----------------------------------------------------------------
-    def field_brief(f: dict[str, Any], role: str, today: date) -> dict[str, Any]:
+    def brief_yield(f: dict[str, Any], user: dict[str, Any]) -> dict[str, Any] | None:
+        if yield_for is None:
+            return None
+        try:
+            y = yield_for(f, user)
+        except Exception:  # an estimate problem must never break the daily brief
+            log.exception("yield estimate failed for %s", f["id"])
+            return None
+        return {k: y.get(k) for k in ("year", "method", "bu_ac", "low", "high", "confidence", "label")}
+
+    def field_brief(f: dict[str, Any], role: str, today: date, user: dict[str, Any] | None = None) -> dict[str, Any]:
         obs = qa.classify(store.list_observations(f["id"]))
         ok = [o for o in obs if o.get("qa_status") == "ok"]
         cutoff = (today - timedelta(days=RECENT_DAYS)).isoformat()
@@ -542,6 +553,7 @@ def make_router(
         if not crop_known and priority < 2 and not season_over:
             headline += " Tip: set the crop (Manage → Edit name & crop) for disease risk."
         out["season_over"] = season_over
+        out["yield"] = brief_yield(f, user) if user else None
         out["headline"], out["priority"] = headline, priority
         return out
 
@@ -555,7 +567,7 @@ def make_router(
             except KeyError:
                 continue
             if not f.get("archived"):
-                fields.append(field_brief(f, role, today))
+                fields.append(field_brief(f, role, today, user))
         fields.sort(key=lambda b: (-b["priority"], b["name"]))
         priorities = [{"field_id": b["id"], "field": b["name"], "text": b["headline"]} for b in fields if b["priority"] >= 2][:3]
         local = [i for i in feed(section="local", user=user) if i["type"] in ("roundup", "report", "storm")][:4]

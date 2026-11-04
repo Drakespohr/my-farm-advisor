@@ -195,6 +195,28 @@ class Store:
         self.log("field.updated", field_id=field_id, before=before, after=changes)
         return rec
 
+    # ---- yield records (append-only) ----------------------------------------------
+    YIELD_KINDS = ("expected", "harvest", "count")
+
+    def add_yield_record(self, field_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Append an expected yield, harvest yield, or field count. Later entries for the same
+        year win when reading; earlier ones are kept for the record."""
+        self.get_field(field_id)  # KeyError if unknown
+        if record.get("kind") not in self.YIELD_KINDS:
+            raise ValueError(f"kind must be one of {', '.join(self.YIELD_KINDS)}")
+        rec = {**record, "recorded": now_iso()}
+        with _LOCK:
+            with (self._field_dir(field_id) / "yields.jsonl").open("a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        self.log("yield.recorded", field_id=field_id, kind=rec["kind"], year=rec.get("year"))
+        return rec
+
+    def list_yield_records(self, field_id: str) -> list[dict[str, Any]]:
+        p = self._field_dir(field_id) / "yields.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
     def redraw_field(self, field_id: str, geometry: dict[str, Any]) -> dict[str, Any]:
         """Save an edited boundary as a new field version and archive the old one.
 

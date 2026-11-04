@@ -173,6 +173,35 @@ The season ends when nearby cropland falls below 75% of its own peak, after whic
 freezes ("Season over") so harvest doesn't read as failure. On the 2025 test field it ran 31
 (mid-June, behind its neighbors) → 68 (mid-July) → 85 (mid-August) → 78 at season end.
 
+## Yield estimate
+
+Each field shows a yield estimate (field page tile and panel, and the Today card). It always says
+which method it used and how sure it is:
+
+| Method | When | Accuracy |
+|---|---|---|
+| **Harvested** | You recorded the harvest yield | Measured |
+| **Field count** | A yield-component count in the last 45 days | Corn about ±20 bu/ac (Purdue); soybeans and wheat shown ±15% (our assumption; guides only say "rough") |
+| **Satellite, calibrated on your farm** | 3+ of your field-years with harvest + expected yield | ± leave-one-out error on your own fields |
+| **Satellite (rough)** | Expected yield (APH) set, in-season images | Shown ±20%; ±30% before nearby crops peak |
+| **Relative only** | No expected yield yet | "Canopy X% greener than cropland nearby" |
+
+Field-count formulas (extension yield-component methods):
+
+- Corn: ears/ac × kernels/ear ÷ kernels per bushel (90,000 default; 80,000 good grain fill; 100,000 stress)
+- Soybeans: plants/ac × pods/plant × seeds/pod ÷ seeds per lb ÷ 60 (2.5 seeds/pod, 3,000 seeds/lb)
+- Wheat: heads/ft² × kernels/head × 43,560 ÷ kernels per lb ÷ 60 (22 kernels/head, 15,000 kernels/lb).
+  With 18,150 kernels/lb this equals UNL NebGuide G1429's `(heads/ft × kernels/head ÷ row in) × 0.48`.
+
+Satellite estimate: `expected × (1 + k × (rel − 1))`, where `rel` is the field's NDVI ÷ the median NDVI of
+cropland within 2 km, averaged over the images where nearby cropland was within 90% of its season peak
+(QA "ok" images only). `k = 1` until calibrated; calibration fits `k` on your harvests (NDVI saturates,
+so `k` is usually above 1). Published Sentinel-2 field-scale models explain only about 25–60% of yield
+variation without local calibration, which is why recording harvests matters.
+
+Records (expected, harvest, count) are append-only in `fields/<id>/yields.jsonl`; the latest entry for a
+year wins. Only owners can add them; shared viewers see the estimate but not the records.
+
 ## Quick start
 
 ```bash
@@ -348,6 +377,10 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | POST | `/api/fields/{id}/sync` | Check for new imagery now (otherwise automatic every 12 h) |
 | GET | `/api/search?q=` | Map search: your fields (inside / within 3 mi / by name) plus places (coordinates, US Census addresses, Nominatim) |
 | GET | `/api/geocode?q=` | Places only (older clients) |
+| GET | `/api/fields/{id}/yield?year=` | Yield estimate with method, range, canopy signal, calibration |
+| POST | `/api/fields/{id}/yield/records` | Owner: add `expected`, `harvest`, or `count` (with inputs) |
+| POST | `/api/yield/count` | Calculate a field count without saving |
+| GET | `/api/yield/methods` | Count defaults, accuracy bands, and sources |
 | GET | `/api/fields/{id}/scenes?start&end&max_cloud` | Available scenes and whether each is processed |
 | POST | `/api/fields/{id}/process` | Fetch a specific date range `{start, end, max_cloud}` → poll `/api/jobs/{job}` |
 | GET | `/api/fields/{id}/observations` | All observations with stats and provenance |
