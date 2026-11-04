@@ -1,6 +1,9 @@
 """Keep saved fields up to date with new satellite passes.
 
-- A new field is backfilled with the last `INITIAL_DAYS` of imagery.
+- A new field is backfilled with the last `INITIAL_DAYS` of imagery, newest image first, so the
+  latest picture shows up within a minute or two and older history fills in behind it.
+- Fields created in bulk are queued and synced one after another right away (not left for the
+  periodic scheduler), and the scheduler handles never-synced fields before routine refreshes.
 - After that, each sync looks back `OVERLAP_DAYS` before the previous sync (scenes can be
   published a few days after acquisition) through today. Already-processed scenes are
   skipped without any download, so overlapping windows cost almost nothing.
@@ -15,6 +18,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
@@ -72,6 +76,8 @@ class Syncer:
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="scene")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._queue: deque[tuple[str, str]] = deque()
+        self._queue_thread: threading.Thread | None = None
 
     # ---- status --------------------------------------------------------------
     def _status_path(self, field_id: str):
@@ -83,6 +89,10 @@ class Syncer:
         job = self._by_field.get(field_id)
         st["job"] = job.view() if job else None
         st["auto_refresh_hours"] = self.refresh_hours or None
+        with self._lock:
+            ids = [fid for fid, _ in self._queue]
+        st["queued"] = field_id in ids
+        st["queue_position"] = ids.index(field_id) + 1 if field_id in ids else None
         if self.refresh_hours and st.get("last_synced"):
             nxt = datetime.fromisoformat(st["last_synced"]) + timedelta(hours=self.refresh_hours)
             st["next_check"] = nxt.replace(microsecond=0).isoformat()
@@ -139,6 +149,8 @@ class Syncer:
             if stale:
                 with ThreadPoolExecutor(max_workers=6) as pool:
                     found += [s for s in pool.map(self._try_load, stale) if s is not None]
+            # Newest first: the latest image is ready in a minute or two; history fills in behind it.
+            found.sort(key=lambda sc: getattr(sc, "datetime", "") or "", reverse=True)
             job.total = len(found)
             job.state = "processing"
 
@@ -190,6 +202,42 @@ class Syncer:
             log.warning("could not reload %s: %s", href, exc)
             return None
 
+    # ---- queue (new fields) ------------------------------------------------------
+    def enqueue(self, field_ids: list[str], reason: str = "new-field") -> list[str]:
+        """Sync these fields one after another, starting now. Returns the ids actually queued."""
+        added = []
+        with self._lock:
+            waiting = {fid for fid, _ in self._queue}
+            for fid in field_ids:
+                job = self._by_field.get(fid)
+                if fid in waiting or (job and job.running):
+                    continue
+                self._queue.append((fid, reason))
+                waiting.add(fid)
+                added.append(fid)
+            if added and not (self._queue_thread and self._queue_thread.is_alive()):
+                self._queue_thread = threading.Thread(target=self._drain, daemon=True, name="field-sync-queue")
+                self._queue_thread.start()
+        return added
+
+    def _drain(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                if not self._queue:
+                    self._queue_thread = None
+                    return
+                fid, reason = self._queue[0]
+            try:
+                self.wait(self.start(fid, reason))
+            except KeyError:
+                log.warning("queued field %s no longer exists", fid)
+            except Exception:
+                log.exception("queued sync for %s failed", fid)
+            finally:
+                with self._lock:
+                    if self._queue and self._queue[0][0] == fid:
+                        self._queue.popleft()
+
     def wait(self, job: Job, timeout: float = 600.0) -> None:
         t0 = time.monotonic()
         while job.running and time.monotonic() - t0 < timeout:
@@ -198,14 +246,16 @@ class Syncer:
     # ---- scheduler -----------------------------------------------------------
     def due_fields(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(timezone.utc)
-        due = []
+        never, due = [], []
         for f in self.store.list_fields():
             last = self.status(f["id"]).get("last_synced")
-            if not last or now - datetime.fromisoformat(last) >= timedelta(hours=self.refresh_hours):
+            if not last:
+                never.append(f["id"])  # e.g. imported from the command line: no imagery yet
+            elif now - datetime.fromisoformat(last) >= timedelta(hours=self.refresh_hours):
                 due.append(f["id"])
             elif self.stale_scene_hrefs(f["id"]):
                 due.append(f["id"])  # processing upgraded: rebuild history now, not in 12 h
-        return due
+        return never + due  # fields with no imagery yet go first
 
     def _loop(self, poll_seconds: float, startup_delay: float) -> None:
         if self._stop.wait(startup_delay):

@@ -85,3 +85,69 @@ def test_kml_waypoint_route_is_rejected_with_help():
 def test_unsupported_file_type():
     with pytest.raises(ValueError):
         boundaries.parse_file("field.shp", b"")
+
+
+# ---- new fields get the newest imagery first, without waiting for the scheduler -------
+
+def _scenes(n):
+    from fieldmonitor.catalog import Scene
+    return [Scene(id=f"S2B_{i:02d}", datetime=f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}T17:00:00Z", platform="sentinel-2b",
+                  mgrs_tile="14TNL", cloud_cover=5.0, epsg=32614, assets={}, self_href=None, source="test") for i in range(n)]
+
+
+def test_new_field_processes_newest_image_first(store, monkeypatch):
+    order = []
+    monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda *a: (_scenes(12), "test"))
+    monkeypatch.setattr("fieldmonitor.sync.process_observation",
+                        lambda st, f, sc: order.append(sc.datetime) or {"status": "clear"})
+    s = Syncer(store, refresh_hours=0)
+    s._pool = __import__("concurrent.futures").futures.ThreadPoolExecutor(max_workers=1)  # deterministic order
+    rec, _ = store.create_field(FIELD, "f")
+    job = s.start(rec["id"], "new-field")
+    s.wait(job)
+    assert job.state == "done" and job.total == 12
+    assert order == sorted(order, reverse=True)  # newest first
+
+
+def test_bulk_import_queues_every_field_even_with_scheduler_off(store, monkeypatch):
+    from shapely.affinity import translate
+    from shapely.geometry import mapping, shape
+    synced = []
+    monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda geom, *a: (synced.append(geom) or [], "test"))
+    s = Syncer(store, refresh_hours=0)  # no periodic scheduler at all
+    ids = [store.create_field(mapping(translate(shape(FIELD), xoff=0.02 * i)), f"f{i}")[0]["id"] for i in range(3)]
+    assert s.enqueue(ids) == ids and s.enqueue(ids[:1]) == []  # no duplicates
+    import time
+    t0 = time.monotonic()
+    while len(synced) < 3 and time.monotonic() - t0 < 10:
+        time.sleep(0.05)
+    assert len(synced) == 3
+    t0 = time.monotonic()
+    while any(s.status(i)["queued"] for i in ids) and time.monotonic() - t0 < 5:
+        time.sleep(0.05)
+    assert all(s.status(i)["last_synced"] and not s.status(i)["queued"] for i in ids)
+
+
+def test_scheduler_handles_never_synced_fields_first(store, syncer):
+    from shapely.affinity import translate
+    from shapely.geometry import mapping, shape
+    old, _ = store.create_field(FIELD, "old")
+    syncer.wait(syncer.start(old["id"], "manual"))
+    new, _ = store.create_field(mapping(translate(shape(FIELD), xoff=0.05)), "new")
+    later = datetime.now(timezone.utc) + timedelta(hours=13)
+    assert syncer.due_fields(later) == [new["id"], old["id"]]
+
+
+def test_api_queues_fields_beyond_the_parallel_limit(store, monkeypatch):
+    from fastapi.testclient import TestClient
+    from shapely.affinity import translate
+    from shapely.geometry import mapping, shape
+    from fieldmonitor.api import BULK_SYNC_LIMIT, create_app
+    from tests.test_api import signup
+    monkeypatch.setattr("fieldmonitor.sync.search_scenes", lambda *a, **k: ([], "test"))
+    c = TestClient(create_app(store, refresh_hours=0), headers={"X-Requested-With": "fieldmonitor"})
+    signup(c, "bulk@x.co", "Bulk Bo")
+    feats = [{"type": "Feature", "properties": {"name": f"F{i}"}, "geometry": mapping(translate(shape(FIELD), xoff=0.02 * i))}
+             for i in range(BULK_SYNC_LIMIT + 2)]
+    r = c.post("/api/fields", json={"geojson": {"type": "FeatureCollection", "features": feats}}).json()
+    assert len(r["sync_jobs"]) == BULK_SYNC_LIMIT and len(r["queued"]) == 2

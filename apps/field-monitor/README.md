@@ -249,8 +249,9 @@ address services are down, the search says so and still shows field matches.
    over ~12,000 ac, are flagged and can't be saved.
 5. Name it, optionally set the crop, and press **Save field**.
 
-Saving starts an automatic backfill of the last 12 months of imagery (about 1–2 minutes;
-progress shows on the field). After that, the server checks every field for new passes every
+Saving starts an automatic backfill of the last 12 months of imagery, **newest image first**,
+so the latest picture shows within a minute or two and the rest of the season fills in behind it
+(progress shows on the field). After that, the server checks every field for new passes every
 12 hours. **Check for new imagery** forces a check now. Older seasons can be pulled from
 **Fetch a specific date range**.
 
@@ -259,8 +260,12 @@ progress shows on the field). After that, the server checks every field for new 
 history, so past numbers are never silently re-measured on a different shape.
 
 **Import** accepts `.kml` and `.kmz` (DJI Pilot 2 / DJI Terra mapping-area missions, Google
-Earth, most farm software) and `.geojson`. Every polygon becomes a field. Imports of more
-than 5 fields are backfilled one field at a time by the scheduler.
+Earth, most farm software) and `.geojson`. Every polygon becomes a field. The first 5 new fields
+start downloading right away; the rest are queued and run one after another immediately (shown as
+"queued for imagery"), even when the 12-hour auto-refresh is turned off.
+
+Fields imported with `fieldmonitor import` download when `fieldmonitor serve` starts (fields with no
+imagery go first), or right away with `fieldmonitor import ... --sync`.
 
 Only the field's own pixels are read from the cloud-optimized GeoTIFFs, not whole 110 km tiles.
 

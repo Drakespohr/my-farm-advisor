@@ -91,7 +91,7 @@ def _png_data_url(data: bytes) -> str:
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-BULK_SYNC_LIMIT = 5  # larger imports are left to the scheduler, which syncs one field at a time
+BULK_SYNC_LIMIT = 5  # new fields synced in parallel right away; the rest are queued
 
 
 def create_app(store: Store | None = None, refresh_hours: float | None = None) -> FastAPI:
@@ -303,10 +303,13 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                 errors.append({"feature": n, "name": name, "error": str(exc)})
         if errors and not (created or existing):
             raise HTTPException(400, {"errors": errors})
-        syncing = []
-        if body.auto_sync and len(created) <= BULK_SYNC_LIMIT:
-            syncing = [syncer.start(fid, "new-field").id for fid in created]
-        return {"created": created, "existing": existing, "errors": errors, "sync_jobs": syncing}
+        syncing, queued = [], []
+        if body.auto_sync and created:
+            # The first few start right away in parallel; the rest are queued and run one after
+            # another immediately (kind to the public imagery service), not at the next scheduler pass.
+            syncing = [syncer.start(fid, "new-field").id for fid in created[:BULK_SYNC_LIMIT]]
+            queued = syncer.enqueue(created[BULK_SYNC_LIMIT:])
+        return {"created": created, "existing": existing, "errors": errors, "sync_jobs": syncing, "queued": queued}
 
     @app.post("/api/fields/{field_id}/redraw", status_code=201)
     def redraw(field_id: str, body: RedrawIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
