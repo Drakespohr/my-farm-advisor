@@ -568,11 +568,13 @@
     return `${Math.round(mins / 1440)} days ago`;
   }
   function jobRunning(f) { return f && f.sync && f.sync.job && ["searching", "processing"].includes(f.sync.job.state); }
+  function syncPending(f) { return jobRunning(f) || Boolean(f && f.sync && f.sync.queued); }
   function syncShort(f) {
     if (jobRunning(f)) {
       const j = f.sync.job;
       return j.state === "searching" ? "finding imagery…" : `updating ${j.done}/${j.total}…`;
     }
+    if (f.sync && f.sync.queued) return `queued for imagery (#${f.sync.queue_position})`;
     const latest = f.latest ? `last clear image ${niceDate(f.latest.date)}` : "no clear image yet";
     return f.sync && f.sync.last_synced ? `${latest} · checked ${relTime(f.sync.last_synced)}` : latest;
   }
@@ -585,7 +587,8 @@
     const running = jobRunning(f);
     let line;
     if (f.replaced_by) line = "Old boundary (replaced). History kept.";
-    else if (running) line = job.reason === "new-field" ? "Getting the last 12 months of images…" : "Checking for new images…";
+    else if (running) line = job.reason === "new-field" ? "Getting the newest images first, then the last 12 months…" : "Checking for new images…";
+    else if (st.queued) line = `Queued for imagery (#${st.queue_position}); it starts as soon as the fields ahead finish.`;
     else line = `Updated ${relTime(st.last_synced)}` + (st.auto_refresh_hours ? ` · checks every ${st.auto_refresh_hours} h` : "");
     $("sync-line").textContent = line;
     $("sync-line").title = st.last_error ? `Some images failed: ${st.last_error}` : "";
@@ -628,7 +631,7 @@
       if (!mapper.mode) await loadFields();
       if (state.field && state.field.observations !== before) await loadObservations(true);
     } catch (_) { /* transient; try again next tick */ }
-    const busy = state.fields.some(jobRunning);
+    const busy = state.fields.some(syncPending);
     pollTimer = setTimeout(refresh, busy ? 3000 : 120000);
   }
 

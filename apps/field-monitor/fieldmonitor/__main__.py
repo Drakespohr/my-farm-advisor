@@ -34,6 +34,7 @@ def _cmd_import(args: argparse.Namespace) -> None:
             sys.exit(f"No account for {args.owner}. Sign up in the app first.")
     elif accounts.user_count():
         sys.exit("Accounts exist: pass --owner EMAIL so the imported fields belong to someone.")
+    new_ids: list[str] = []
     data = json.loads(Path(args.geojson).read_text())
     feats = data["features"] if data.get("type") == "FeatureCollection" else [data]
     for n, feat in enumerate(feats, start=1):
@@ -51,6 +52,21 @@ def _cmd_import(args: argparse.Namespace) -> None:
                 continue
             accounts.grant(rec["id"], owner["id"], "owner")
         print(f"{'created ' if created else 'exists  '} {rec['id']}  {rec['area_ac']:.1f} ac  {rec['name']}")
+        if created:
+            new_ids.append(rec["id"])
+    if not new_ids:
+        return
+    if not args.sync:
+        print(f"\n{len(new_ids)} new field(s) will get imagery (newest first) as soon as `fieldmonitor serve` is running,"
+              " or run this import with --sync to download now.")
+        return
+    from .sync import Syncer
+
+    syncer = Syncer(store, refresh_hours=0)
+    for fid in new_ids:  # one at a time, newest image first
+        job = syncer.start(fid, "new-field")
+        syncer.wait(job, timeout=3600)
+        print(f"synced   {fid}: {job.total} images, {job.clear} clear{', errors: ' + str(len(job.errors)) if job.errors else ''}")
 
 
 def _cmd_process(args: argparse.Namespace) -> None:
@@ -150,6 +166,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--name-property", default="name")
     s.add_argument("--id-property", default=None)
     s.add_argument("--owner", default=None, help="email of the account that owns the imported fields")
+    s.add_argument("--sync", action="store_true", help="download the last 12 months of imagery now (newest first)")
     s.set_defaults(fn=_cmd_import)
 
     s = sub.add_parser("process", help="fetch and process imagery for a field (or 'all')")
