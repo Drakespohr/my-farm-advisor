@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from . import marketplace_enabled
 from .accounts import ROLE_LABELS, ROLES, SESSION_COOKIE, SESSION_DAYS, Accounts, google_config, new_id, now
 from .store import Store
 
@@ -113,7 +114,7 @@ def make_router(
     # ---- auth ----------------------------------------------------------------
     @r.get("/api/auth/config")
     def auth_config() -> dict[str, Any]:
-        return {"google": google_config() is not None, "roles": ROLE_LABELS}
+        return {"google": google_config() is not None, "roles": ROLE_LABELS, "features": {"marketplace": marketplace_enabled()}}
 
     @r.post("/api/auth/register", status_code=201)
     def register(body: RegisterIn, request: Request, response: Response) -> dict[str, Any]:
@@ -221,7 +222,7 @@ def make_router(
                 s = field_summary(fid)
                 showcase.append({"name": f["name"], "crop": f.get("crop"), "area_ac": f["area_ac"],
                                  "score": (s or {}).get("score"), "label": (s or {}).get("label"), "as_of": (s or {}).get("as_of")})
-        return {"profile": p, "listings": list_listings(user=user_id, viewer=user), "showcase": showcase, "is_me": user_id == user["id"]}
+        return {"profile": p, "listings": list_listings(user=user_id, viewer=user) if marketplace_enabled() else [], "showcase": showcase, "is_me": user_id == user["id"]}
 
     # ---- field sharing ---------------------------------------------------------
     def owner_or_403(field_id: str, user: dict[str, Any]) -> None:
@@ -287,6 +288,10 @@ def make_router(
         with accounts.db() as c:
             return [listing_row(x) for x in c.execute(sql, args).fetchall()]
 
+    def market_on() -> None:
+        if not marketplace_enabled():
+            raise HTTPException(404, "The marketplace is turned off.")
+
     @r.get("/api/market/meta")
     def market_meta() -> dict[str, Any]:
         return {"kinds": LISTING_KINDS, "categories": CATEGORIES, "roles": ROLE_LABELS}
@@ -294,6 +299,7 @@ def make_router(
     @r.get("/api/listings")
     def listings(kind: str | None = None, category: str | None = None, q: str | None = Query(None, max_length=80),
                  mine: bool = False, user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        market_on()
         return list_listings(viewer=user, user=user["id"] if mine else None, kind=kind, category=category, q=q)
 
     def validate_listing(kind: str | None, category: str | None) -> None:
@@ -304,6 +310,7 @@ def make_router(
 
     @r.post("/api/listings", status_code=201)
     def create_listing(body: ListingIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        market_on()
         validate_listing(body.kind, body.category)
         lid = new_id("l")
         with accounts.db() as c:
@@ -317,6 +324,7 @@ def make_router(
 
     @r.get("/api/listings/{listing_id}")
     def get_listing(listing_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        market_on()
         with accounts.db() as c:
             row = c.execute(
                 "SELECT l.*, p.display_name AS seller_name, p.business_name AS seller_business, p.roles AS seller_roles "

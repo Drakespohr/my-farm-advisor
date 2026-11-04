@@ -47,7 +47,7 @@
     const card = el("div", { class: "auth-card card" });
     const render = () => {
       card.replaceChildren();
-      card.append(el("h1", { text: FM.appName || "Overacre" }), el("p", { class: "muted", text: FM.tagline || "Satellite field monitoring and a marketplace for ag businesses." }));
+      card.append(el("h1", { text: FM.appName || "Overacre" }), el("p", { class: "muted", text: FM.tagline || "Satellite field monitoring." }));
       card.append(el("div", { class: "seg" },
         el("button", { type: "button", class: mode === "login" ? "on" : "", text: "Log in", onclick: () => { mode = "login"; render(); } }),
         el("button", { type: "button", class: mode === "signup" ? "on" : "", text: "Sign up", onclick: () => { mode = "signup"; render(); } })));
@@ -211,7 +211,7 @@
     const thread = el("div", { class: "thread card" });
     p.append(el("div", { class: "page-head" }, el("h1", { text: "Messages" })), el("div", { class: `inbox ${convId ? "has-thread" : ""}` }, list, thread));
     const convs = await api("/api/conversations");
-    if (!convs.length) list.append(el("p", { class: "muted", text: "No messages yet. Contact someone from the Marketplace." }));
+    if (!convs.length) list.append(el("p", { class: "muted", text: (FM.features || {}).marketplace ? "No messages yet. Contact someone from the Marketplace." : "No messages yet." }));
     for (const c of convs) {
       list.append(el("a", { class: `conv ${c.id === convId ? "active" : ""}`, href: `#/messages/${c.id}` },
         avatar(c.other_name, "sm"),
@@ -392,7 +392,7 @@
     const list = el("div", { class: "stack" });
     const chips = el("div", { class: "chips", role: "tablist" });
     const load = async () => {
-      chips.replaceChildren(...SECTIONS.map(([label, key]) => el("button", { type: "button", role: "tab", class: key === section ? "on" : "", text: label,
+      chips.replaceChildren(...SECTIONS.filter(([, k]) => k !== "market" || (FM.features || {}).marketplace).map(([label, key]) => el("button", { type: "button", role: "tab", class: key === section ? "on" : "", text: label,
         "aria-selected": String(key === section), onclick: () => { section = key; load(); } })));
       list.replaceChildren(el("p", { class: "muted small", text: "Loading…" }));
       const items = await api(`/api/feed?section=${section}`);
@@ -519,7 +519,7 @@
         el("div", { class: "row space" }, el("b", { text: f.name }), f.score != null ? el("span", { class: `score-pill ${FM.scoreClass(f.score)}`, text: String(f.score) }) : null),
         el("div", { class: "muted small", text: `${FM.fmt(f.area_ac, 0)} ac${f.crop ? " · " + f.crop : ""}${f.label ? " · " + f.label : ""}${f.as_of ? " · " + f.as_of : ""}` })))));
     }
-    p.append(el("h2", { text: data.is_me ? "My listings" : "Listings" }),
+    if ((FM.features || {}).marketplace) p.append(el("h2", { text: data.is_me ? "My listings" : "Listings" }),
       data.listings.length ? el("div", { class: "lgrid" }, ...data.listings.map(listingCard)) : el("p", { class: "muted", text: "No active listings." }));
     if (!data.is_me) p.append(el("button", { type: "button", class: "linkbtn small", text: "Report this profile", onclick: () => report("user", pr.id) }));
     if (editing) p.prepend(editProfile(pr, m));

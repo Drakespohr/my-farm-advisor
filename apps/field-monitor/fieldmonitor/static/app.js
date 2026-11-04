@@ -329,7 +329,9 @@
 
   // Search: your fields, an address, a place, or coordinates (always on the map)
   const searchPin = L.layerGroup().addTo(map);
-  function closeSearch() { $("search-results").hidden = true; }
+  let suggestSeq = 0;
+  let suggestTimer = null;
+  function closeSearch() { $("search-results").hidden = true; $("search-input").setAttribute("aria-expanded", "false"); }
   function searchNote(text) { return el("li", { class: "small muted search-note", text }); }
   function goToPlace(p) {
     closeSearch();
@@ -355,6 +357,8 @@
     const q = $("search-input").value.trim();
     const list = $("search-results");
     if (q.length < 2) return;
+    clearTimeout(suggestTimer);
+    suggestSeq++;
     list.hidden = false;
     list.replaceChildren(searchNote("Searching…"));
     try {
@@ -379,8 +383,66 @@
       list.replaceChildren(searchNote(err.message));
     }
   });
-  $("search-input").addEventListener("keydown", (e) => { if (e.key === "Escape") closeSearch(); });
   map.on("click", closeSearch);
+
+  // Type-ahead: suggestions while typing (your fields, coordinates, places near the map view).
+  // Arrow keys move through them, Enter picks the highlighted one, or runs the full search.
+  function highlight(text, q) {
+    const i = text.toLowerCase().indexOf(q.toLowerCase());
+    if (!q || i < 0) return [text];
+    return [text.slice(0, i), el("mark", { text: text.slice(i, i + q.length) }), text.slice(i + q.length)];
+  }
+  function suggestItems() { return [...$("search-results").querySelectorAll("button[data-suggest]")]; }
+  function setActive(idx) {
+    const items = suggestItems();
+    items.forEach((b, i) => { b.classList.toggle("active", i === idx); b.setAttribute("aria-selected", String(i === idx)); });
+    if (items[idx]) items[idx].scrollIntoView({ block: "nearest" });
+    $("search-input").setAttribute("aria-activedescendant", items[idx] ? items[idx].id : "");
+  }
+  function renderSuggestions(res, q) {
+    const list = $("search-results");
+    list.replaceChildren();
+    let n = 0;
+    const item = (onclick, ...kids) => el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: `sugg-${n++}`, onclick }, ...kids));
+    if (res.fields.length) list.append(el("li", { class: "search-head", text: "Your fields" }));
+    for (const f of res.fields) {
+      list.append(item(() => goToField(f), el("strong", {}, ...highlight(f.name, q)), f.crop ? ` · ${f.crop}` : "",
+        f.match !== "name" ? el("span", { class: "muted", text: ` — ${fieldWhy(f)}` }) : null));
+    }
+    if (res.places.length) list.append(el("li", { class: "search-head", text: res.places[0].kind === "coordinates" ? "Coordinates" : "Suggestions" }));
+    for (const p of res.places) list.append(item(() => goToPlace(p), ...highlight(p.name, q)));
+    list.append(item(() => $("search-form").requestSubmit(), el("span", { class: "muted", text: `Search all results for “${q}” ↵` })));
+    if (res.error) list.append(searchNote(res.error));
+    list.hidden = false;
+    $("search-input").setAttribute("aria-expanded", "true");
+  }
+  async function fetchSuggestions(q) {
+    const seq = ++suggestSeq;
+    const c = map.getCenter();
+    try {
+      const res = await api(`/api/search/suggest?q=${encodeURIComponent(q)}&lat=${c.lat.toFixed(3)}&lon=${c.lng.toFixed(3)}`);
+      if (seq !== suggestSeq || $("search-input").value.trim() !== q) return; // a newer keystroke won
+      renderSuggestions(res, q);
+    } catch (_) { /* typing shouldn't show errors; Enter still runs the full search */ }
+  }
+  $("search-input").addEventListener("input", () => {
+    clearTimeout(suggestTimer);
+    const q = $("search-input").value.trim();
+    if (q.length < 2) { suggestSeq++; closeSearch(); return; }
+    suggestTimer = setTimeout(() => fetchSuggestions(q), 250);
+  });
+  $("search-input").addEventListener("keydown", (e) => {
+    const items = suggestItems();
+    const cur = items.findIndex((b) => b.classList.contains("active"));
+    if (e.key === "Escape") { closeSearch(); return; }
+    if ($("search-results").hidden || !items.length) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); setActive(Math.min(cur + 1, items.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive(Math.max(cur - 1, -1)); }
+    else if (e.key === "Enter" && cur >= 0) { e.preventDefault(); clearTimeout(suggestTimer); items[cur].click(); }
+  });
+  $("search-input").addEventListener("focus", () => {
+    if ($("search-results").children.length && $("search-input").value.trim().length >= 2) $("search-results").hidden = false;
+  });
   $("locate-btn").addEventListener("click", () => {
     $("locate-btn").textContent = "◎ Locating…";
     map.locate({ setView: true, maxZoom: 17, enableHighAccuracy: true, timeout: 15000 });
@@ -1185,7 +1247,10 @@
     const [view, ...rest] = h.split("/");
     const arg = rest.join("/");
     if (view === "login") { showView("auth"); FM.views.auth(); return; }
-    if (view === "market") { showView("market"); FM.views.market(arg); return; }
+    if (view === "market") {
+      if (!(FM.features || {}).marketplace) { location.hash = "#/today"; return; }
+      showView("market"); FM.views.market(arg); return;
+    }
     if (view === "news" || view === "feed") { showView("feed"); FM.views.news(arg); return; }
     if (view === "today" || view === "") { showView("today"); FM.views.today(); return; }
     if (view === "messages") { showView("messages"); FM.views.messages(arg); return; }
@@ -1202,6 +1267,9 @@
     const [health, indices] = await Promise.all([api("/api/health"), api("/api/indices")]);
     FM.appName = health.app_name || "Overacre";
     FM.tagline = health.tagline || "";
+    FM.features = health.features || {};
+    // Marketplace is paused unless the server turns it on (FIELD_MONITOR_MARKETPLACE=1).
+    document.querySelectorAll('[data-nav="market"]').forEach((a) => { a.hidden = !FM.features.marketplace; });
     document.title = FM.appName;
     $("brand").textContent = FM.appName;
     $("version").textContent = `v${health.app_version} · processing v${health.processing_version}${health.git_commit ? " · " + health.git_commit.slice(0, 7) : ""}`;

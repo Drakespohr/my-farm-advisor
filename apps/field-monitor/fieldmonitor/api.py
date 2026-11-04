@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import APP_NAME, APP_TAGLINE, PROCESSING_VERSION, __version__, analysis, diagnose, qa, score as scoring
+from . import APP_NAME, APP_TAGLINE, APP_TAGLINE_NO_MARKET, PROCESSING_VERSION, marketplace_enabled, __version__, analysis, diagnose, qa, score as scoring
 from . import search as mapsearch
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
@@ -176,7 +176,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return {
             "ok": True,
             "app_name": APP_NAME,
-            "tagline": APP_TAGLINE,
+            "tagline": APP_TAGLINE if marketplace_enabled() else APP_TAGLINE_NO_MARKET,
+            "features": {"marketplace": marketplace_enabled()},
             "app_version": __version__,
             "processing_version": PROCESSING_VERSION,
             "git_commit": git_commit(),
@@ -305,6 +306,16 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         mine = accounts.fields_for(user["id"])
         fields = [f for f in store.list_fields(True) if f["id"] in mine]
         return mapsearch.search(q, fields, geocoder)
+
+    @app.get("/api/search/suggest")
+    def search_suggest(q: str = Query(..., min_length=1, max_length=200), lat: float | None = Query(None, ge=-90, le=90),
+                       lon: float | None = Query(None, ge=-180, le=180),
+                       user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Type-ahead suggestions for the map search (your fields, coordinates, Photon places near the map view)."""
+        mine = accounts.fields_for(user["id"])
+        fields = [f for f in store.list_fields(True) if f["id"] in mine]
+        near = (lat, lon) if lat is not None and lon is not None else None
+        return mapsearch.suggest(q, fields, geocoder, near)
 
     @app.get("/api/fields/{field_id}")
     def get_field(field_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
