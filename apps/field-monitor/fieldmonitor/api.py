@@ -33,6 +33,7 @@ from .news import News
 from .usda_ams import STATE_FULL
 from .prices import Prices
 from .social import make_router
+from .farms import make_router as make_farms_router
 from .weather import WeatherStore
 from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
@@ -55,6 +56,7 @@ class FieldIn(BaseModel):
     file_name: str | None = Field(None, description="Uploaded boundary file name (.kml, .kmz, .geojson, .json)")
     file_b64: str | None = Field(None, description="Base64 file contents, used with file_name")
     auto_sync: bool = Field(True, description="Start pulling imagery for new fields immediately")
+    farm_id: str | None = Field(None, description="Farm to add the fields to (you must own it); defaults to your first farm")
 
 
 class RedrawIn(BaseModel):
@@ -238,9 +240,11 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     def list_fields(include_archived: bool = False, user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
         out = []
         mine = accounts.fields_for(user["id"])
+        farm_names = {fm["id"]: fm["name"] for fm in accounts.farms_for(user["id"])}
         for f in store.list_fields(include_archived):
             if f["id"] not in mine:
                 continue
+            farm_id = accounts.farm_of(f["id"])
             obs = qa.classify(store.list_observations(f["id"]))
             clear = [o for o in obs if o["status"] == "clear"]
             good = [o for o in clear if o["qa_status"] == "ok"]
@@ -255,6 +259,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                     else None,
                     "sync": syncer.status(f["id"]),
                     "my_role": mine[f["id"]],
+                    "farm_id": farm_id,
+                    "farm_name": farm_names.get(farm_id) if farm_id else None,
                     "score": scoring.field_score(obs),
                 }
             )
@@ -278,6 +284,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             raise HTTPException(400, f"Could not read boundaries: {exc}") from None
         if not feats:
             raise HTTPException(400, "No features with geometry found.")
+        if body.farm_id and accounts.farm_role(body.farm_id, user["id"]) != "owner":
+            raise HTTPException(403, "You can only add fields to a farm you own.")
         created, existing, errors = [], [], []
         for n, (geom, props) in enumerate(feats, start=1):
             name = (
@@ -298,10 +306,12 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                     source=source,
                 )
                 owner = accounts.owner_of(rec["id"])
-                if owner and owner != user["id"]:
+                if owner and accounts.access(rec["id"], user["id"]) != "owner":
                     errors.append({"feature": n, "name": name, "error": "Someone else already monitors this exact boundary."})
                     continue
                 accounts.grant(rec["id"], user["id"], "owner")
+                if is_new and body.farm_id:
+                    accounts.add_field_to_farm(rec["id"], body.farm_id)
                 (created if is_new else existing).append(rec["id"])
             except (ValueError, FileExistsError) as exc:
                 errors.append({"feature": n, "name": name, "error": str(exc)})
@@ -323,9 +333,13 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             if len(feats) != 1:
                 raise ValueError("Send exactly one boundary.")
             new = store.redraw_field(field_id, feats[0][0])
-            accounts.grant(new["id"], user["id"], "owner")
+            farm = accounts.farm_of(field_id)
+            if farm:  # the new boundary stays on the same farm, so the whole team keeps access
+                accounts.add_field_to_farm(new["id"], farm)
+            else:
+                accounts.grant(new["id"], user["id"], "owner")
             for m in accounts.field_members(field_id):
-                if m["role"] == "viewer":
+                if m.get("via") == "field" and m["role"] == "viewer":  # carry over one-field shares
                     accounts.grant(new["id"], m["user_id"], "viewer")
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
@@ -663,6 +677,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return field_score_for(field_id, as_of)
 
     app.include_router(make_router(accounts, store, require_user, lambda fid: field_score_for(fid)))
+    app.include_router(make_farms_router(accounts, store, require_user))
     app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices,
                                      yield_for=lambda f, user: yield_for(f, user)))
 
