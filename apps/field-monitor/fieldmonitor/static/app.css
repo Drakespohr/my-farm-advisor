@@ -118,6 +118,13 @@ body.mapping .detail, body.mapping .map-legend { display: none !important; }
   border: none; border-radius: 4px; padding: 8px; cursor: pointer;
 }
 .search-results button:hover, .search-results button:focus { background: var(--surface-2); }
+.search-results .search-head { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); padding: 8px 8px 2px; }
+.search-results .search-note { padding: 8px; }
+.search-pin {
+  width: 22px; height: 22px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); background: #ef4444;
+  border: 3px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.5); box-sizing: border-box;
+}
+.search-results .muted { font-size: 12px; }
 .mapper-sheet {
   position: absolute; z-index: 1000; left: 50%; bottom: 16px; transform: translateX(-50%);
   width: min(640px, calc(100% - 24px)); background: var(--surface-1); color: var(--text-primary);
@@ -233,7 +240,8 @@ select { max-width: 100%; }
 .table tr.clickable:hover { background: var(--surface-2); }
 
 .map-legend {
-  position: absolute; z-index: 450; top: 10px; right: 10px; background: var(--surface-1); color: var(--text-primary);
+  /* top: below the always-visible search bar */
+  position: absolute; z-index: 450; top: 58px; right: 10px; background: var(--surface-1); color: var(--text-primary);
   border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; width: 220px;
 }
 .map-legend .ramp { height: 10px; border-radius: 2px; margin: 4px 0 2px; }

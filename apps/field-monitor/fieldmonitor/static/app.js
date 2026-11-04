@@ -250,7 +250,6 @@
     }
     document.body.classList.add("mapping");
     $("sidebar").classList.remove("open");
-    $("mapper-top").hidden = false;
     $("mapper-sheet").hidden = false;
     $("mapper-meta").hidden = mode === "edit";
     $("mapper-title").textContent = mode === "edit" ? `Edit boundary: ${field.name}` : "Map a new field";
@@ -270,7 +269,6 @@
     mapper.layer.clearLayers();
     if (mapper.fix) { map.removeLayer(mapper.fix); mapper.fix = null; }
     document.body.classList.remove("mapping");
-    $("mapper-top").hidden = true;
     $("mapper-sheet").hidden = true;
     $("search-results").hidden = true;
     map.getContainer().classList.remove("mapping-cursor");
@@ -329,29 +327,60 @@
     }
   });
 
-  // Place search and GPS
+  // Search: your fields, an address, a place, or coordinates (always on the map)
+  const searchPin = L.layerGroup().addTo(map);
+  function closeSearch() { $("search-results").hidden = true; }
+  function searchNote(text) { return el("li", { class: "small muted search-note", text }); }
+  function goToPlace(p) {
+    closeSearch();
+    searchPin.clearLayers();
+    if (p.bbox && p.kind === "place") map.fitBounds(p.bbox, { maxZoom: 17 });
+    else map.setView([p.lat, p.lon], Math.max(map.getZoom(), 16));
+    L.marker([p.lat, p.lon], { title: p.name, icon: L.divIcon({ className: "", html: '<div class="search-pin"></div>', iconSize: [22, 22], iconAnchor: [11, 22], popupAnchor: [0, -20] }) }).bindPopup(el("div", { class: "small" },
+      el("strong", { text: p.name }), el("br"), `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`)).addTo(searchPin).openPopup();
+  }
+  function goToField(f) {
+    closeSearch();
+    searchPin.clearLayers();
+    if (mapper.mode || !state.fields.some((x) => x.id === f.id)) map.fitBounds(f.bbox, { padding: [30, 30], maxZoom: 16 });
+    else selectField(f.id);
+  }
+  function fieldWhy(f) {
+    if (f.match === "inside") return "the point is in this field";
+    if (f.match === "near") return `${fmt(f.distance_mi, 1)} mi away`;
+    return "name matches";
+  }
   $("search-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const q = $("search-input").value.trim();
     const list = $("search-results");
     if (q.length < 2) return;
     list.hidden = false;
-    list.replaceChildren(el("li", { class: "small muted", text: "Searching…", style: "padding:8px" }));
+    list.replaceChildren(searchNote("Searching…"));
     try {
-      const hits = await api(`/api/geocode?q=${encodeURIComponent(q)}`);
+      const res = await api(`/api/search?q=${encodeURIComponent(q)}`);
       list.replaceChildren();
-      if (!hits.length) list.append(el("li", { class: "small muted", text: "No matches. Try a town, road, or 'lat, lon'.", style: "padding:8px" }));
-      for (const h of hits) {
-        list.append(el("li", {}, el("button", { type: "button", text: h.name, onclick: () => {
-          list.hidden = true;
-          if (h.bbox) map.fitBounds(h.bbox, { maxZoom: 17 });
-          else map.setView([h.lat, h.lon], 17);
-        } })));
+      if (res.fields.length) list.append(el("li", { class: "search-head", text: "Your fields" }));
+      for (const f of res.fields) {
+        list.append(el("li", {}, el("button", { type: "button", class: "search-field", onclick: () => goToField(f) },
+          el("strong", { text: f.name }), f.crop ? ` · ${f.crop}` : "", f.archived ? " · archived" : "",
+          el("span", { class: "muted", text: ` — ${fieldWhy(f)}` }))));
       }
+      if (res.places.length) list.append(el("li", { class: "search-head", text: res.coordinates ? "Coordinates" : "Places" }));
+      for (const p of res.places) {
+        const near = p.fields_near.length ? ` · ${p.fields_near.length} of your fields nearby` : "";
+        list.append(el("li", {}, el("button", { type: "button", onclick: () => goToPlace(p) },
+          p.name, el("span", { class: "muted", text: near + (p.source ? ` · ${p.source}` : "") }))));
+      }
+      if (res.error) list.append(searchNote(res.error));
+      if (!res.fields.length && !res.places.length && !res.error)
+        list.append(searchNote("No matches. Try a field name, an address (1234 Road 12, Aurora NE), a town, or 'lat, lon'."));
     } catch (err) {
-      list.replaceChildren(el("li", { class: "small", text: err.message, style: "padding:8px" }));
+      list.replaceChildren(searchNote(err.message));
     }
   });
+  $("search-input").addEventListener("keydown", (e) => { if (e.key === "Escape") closeSearch(); });
+  map.on("click", closeSearch);
   $("locate-btn").addEventListener("click", () => {
     $("locate-btn").textContent = "◎ Locating…";
     map.locate({ setView: true, maxZoom: 17, enableHighAccuracy: true, timeout: 15000 });
