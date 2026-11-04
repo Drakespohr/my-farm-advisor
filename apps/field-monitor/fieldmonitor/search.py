@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import re
 import threading
+from collections import OrderedDict
 import time
 from typing import Any, Callable, Iterable, Optional
 
@@ -23,6 +24,10 @@ from shapely.geometry import Point, shape
 from shapely.ops import nearest_points
 
 NEAR_MILES = 3.0
+PHOTON_URL = "https://photon.komoot.io/api/"
+US_BBOX = "-125.0,24.0,-66.5,49.5"  # contiguous US (minLon,minLat,maxLon,maxLat)
+SUGGEST_CACHE_SECONDS = 24 * 3600
+SUGGEST_CACHE_SIZE = 512
 MAX_FIELDS = 8
 _MI_PER_DEG_LAT = 69.0
 
@@ -116,6 +121,7 @@ class Geocoder:
         self.countries = countries
         self._lock = threading.Lock()
         self._last = 0.0
+        self._suggest_cache: "OrderedDict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]]" = OrderedDict()
 
     def census(self, q: str) -> list[dict[str, Any]]:
         r = self.http_get(
@@ -146,6 +152,36 @@ class Geocoder:
             out.append({"name": hit.get("display_name", ""), "lat": float(hit["lat"]), "lon": float(hit["lon"]),
                         "bbox": [[float(bb[0]), float(bb[2])], [float(bb[1]), float(bb[3])]] if bb else None,
                         "kind": "place", "source": "OpenStreetMap"})
+        return out
+
+    def photon(self, q: str, near: Optional[tuple[float, float]] = None) -> list[dict[str, Any]]:
+        """Type-ahead place suggestions from Photon (OpenStreetMap data, built for autocomplete).
+        Nominatim's usage policy forbids autocomplete, so suggestions never go there."""
+        key = (q.strip().lower(), tuple(round(v, 1) for v in near) if near else None)
+        hit = self._suggest_cache.get(key)
+        if hit and time.monotonic() - hit[0] < SUGGEST_CACHE_SECONDS:
+            self._suggest_cache.move_to_end(key)
+            return hit[1]
+        params: dict[str, Any] = {"q": q, "limit": 6, "lang": "en"}
+        if near:  # rank places near the map view first
+            params["lat"], params["lon"] = round(near[0], 3), round(near[1], 3)
+        if self.countries.strip().lower() == "us":
+            params["bbox"] = US_BBOX
+        r = self.http_get(PHOTON_URL, params=params, headers={"User-Agent": self.user_agent}, timeout=5.0)
+        r.raise_for_status()
+        out = []
+        for f in r.json().get("features", []):
+            pr = f.get("properties") or {}
+            if self.countries and pr.get("countrycode") and pr["countrycode"].lower() not in self.countries.lower().split(","):
+                continue
+            lon, lat = f["geometry"]["coordinates"][:2]
+            ext = pr.get("extent")  # [minLon, maxLat, maxLon, minLat]
+            out.append({"name": _photon_label(pr), "lat": float(lat), "lon": float(lon),
+                        "bbox": [[ext[3], ext[0]], [ext[1], ext[2]]] if ext and len(ext) == 4 else None,
+                        "kind": "address" if pr.get("housenumber") else "place", "source": "OpenStreetMap"})
+        self._suggest_cache[key] = (time.monotonic(), out)
+        while len(self._suggest_cache) > SUGGEST_CACHE_SIZE:
+            self._suggest_cache.popitem(last=False)
         return out
 
     def lookup(self, q: str) -> tuple[list[dict[str, Any]], Optional[str]]:
@@ -186,6 +222,39 @@ def search(q: str, fields: list[dict[str, Any]], geocoder: Geocoder) -> dict[str
         p["fields_near"] = [m["id"] for m in match_fields("", fields, [(p["lat"], p["lon"])])]
     return {"query": q, "coordinates": coords is not None, "fields": match_fields(q, fields, points),
             "places": places, "error": error}
+
+
+def _photon_label(pr: dict[str, Any]) -> str:
+    first = " ".join(x for x in (pr.get("housenumber"), pr.get("street")) if x) if pr.get("street") else None
+    name = pr.get("name")
+    parts = [name, first] if name and first and name != first else [name or first]
+    place = pr.get("city") or pr.get("town") or pr.get("village") or pr.get("district")
+    state = pr.get("state")
+    parts += [place if place != (name or first) else None, pr.get("county") if not place else None, state]
+    return ", ".join(dict.fromkeys(p for p in parts if p)) or "Unnamed place"
+
+
+def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
+            near: Optional[tuple[float, float]] = None) -> dict[str, Any]:
+    """Fast suggestions while typing: your fields by name, parsed coordinates, then Photon places."""
+    q = q.strip()
+    out: dict[str, Any] = {"query": q, "fields": [], "places": [], "error": None}
+    if len(q) < 2:
+        return out
+    coords = parse_coords(q)
+    if coords:
+        out["places"] = [{"name": f"{coords[0]:.6f}, {coords[1]:.6f}", "lat": coords[0], "lon": coords[1],
+                          "bbox": None, "kind": "coordinates", "source": None}]
+        out["fields"] = match_fields("", fields, [coords])[:3]
+        return out
+    out["fields"] = [f for f in match_fields(q, fields, []) if f["match"] == "name"][:4]
+    half_typed_coords = re.search(r"\d", q) and re.fullmatch(r"[-+\d.,\s°'\"NSEWnsew]+", q)
+    if len(q) >= 3 and not half_typed_coords:  # wait for complete coordinates instead of geocoding digits
+        try:
+            out["places"] = geocoder.photon(q, near)[:5]
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            out["error"] = f"Place suggestions unavailable ({exc.__class__.__name__}); press Enter to search."
+    return out
 
 
 def _only_names(q: str, named: list[dict[str, Any]]) -> bool:

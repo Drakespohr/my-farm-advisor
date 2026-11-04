@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from shapely.geometry import shape
 
-from . import disease, qa
+from . import disease, qa, marketplace_enabled
 from .accounts import Accounts, new_id, now
 from .news import News
 from .prices import Prices
@@ -432,7 +432,7 @@ def make_router(
                 title = "This week across Overacre" if section == "all" else "This week near your fields"
                 items.append({"type": "roundup", "id": f"roundup:{section}:{week}", "time": now(), "title": title, "points": pts_txt})
 
-        if section in ("all", "market"):
+        if section in ("all", "market") and marketplace_enabled():
             with accounts.db() as c:
                 for x in c.execute("SELECT l.*, p.display_name AS author, p.business_name AS business FROM listings l "
                                    "JOIN profiles p ON p.user_id=l.user_id WHERE l.status='active' AND l.created>=? "

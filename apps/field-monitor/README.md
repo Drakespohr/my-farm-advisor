@@ -43,6 +43,9 @@ current.
 
 ## Accounts, sharing, and the marketplace
 
+> The marketplace is **paused** by default: the tab, listing endpoints, and listing feed items are
+> hidden. Listings already saved are kept. Set `FIELD_MONITOR_MARKETPLACE=1` to turn it back on.
+
 The monitoring is the backbone of a small ag-business network:
 
 - **Accounts:** email + password (scrypt-hashed), or **Continue with Google** when
@@ -196,6 +199,10 @@ The search bar at the top of the map is always there. Type any of:
 - a town, road, or landmark: OpenStreetMap Nominatim (US only; set
   `FIELD_MONITOR_GEOCODE_COUNTRIES` to change, empty for worldwide).
 
+As you type, suggestions appear: your fields by name, the coordinates you typed, and places near
+the map view (from [Photon](https://photon.komoot.io), OpenStreetMap data, cached for a day;
+Nominatim's policy doesn't allow autocomplete). Use ↑/↓ and Enter, or press Enter for the full search.
+
 Results list **your fields first**: the field the point falls in, then fields within 3 miles (by
 edge distance), then name matches. Tap a field to open it; tap a place to drop a pin there.
 Only your own and shared fields are searched. Coordinates and field names work offline; if the
@@ -348,6 +355,7 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | POST | `/api/fields/{id}/sync` | Check for new imagery now (otherwise automatic every 12 h) |
 | GET | `/api/search?q=` | Map search: your fields (inside / within 3 mi / by name) plus places (coordinates, US Census addresses, Nominatim) |
 | GET | `/api/geocode?q=` | Places only (older clients) |
+| GET | `/api/search/suggest?q=&lat=&lon=` | Type-ahead suggestions (fields, coordinates, Photon places near lat/lon) |
 | GET | `/api/fields/{id}/scenes?start&end&max_cloud` | Available scenes and whether each is processed |
 | POST | `/api/fields/{id}/process` | Fetch a specific date range `{start, end, max_cloud}` → poll `/api/jobs/{job}` |
 | GET | `/api/fields/{id}/observations` | All observations with stats and provenance |
