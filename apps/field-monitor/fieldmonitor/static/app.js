@@ -385,8 +385,11 @@
   });
   map.on("click", closeSearch);
 
-  // Type-ahead: suggestions while typing (your fields, coordinates, places near the map view).
-  // Arrow keys move through them, Enter picks the highlighted one, or runs the full search.
+  // Type-ahead like a maps search bar: one list of the 5 most likely matches while you type
+  // (coordinates, your fields, then addresses). ↑/↓ move, Enter picks the highlighted (or first)
+  // suggestion. Google suggestions share a session token until one is picked (one billed session).
+  let placeSession = null;
+  const newSession = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
   function highlight(text, q) {
     const i = text.toLowerCase().indexOf(q.toLowerCase());
     if (!q || i < 0) return [text];
@@ -399,37 +402,56 @@
     if (items[idx]) items[idx].scrollIntoView({ block: "nearest" });
     $("search-input").setAttribute("aria-activedescendant", items[idx] ? items[idx].id : "");
   }
+  async function pickSuggestion(it) {
+    $("search-input").value = it.type === "field" ? it.main : it.name || it.main;
+    if (it.type === "field") { goToField(it); return; }
+    if (it.place_id) {
+      const session = placeSession;
+      placeSession = null; // picking a place ends the session; the next search starts a new one
+      try {
+        goToPlace(await api(`/api/search/place?id=${encodeURIComponent(it.place_id)}${session ? `&session=${session}` : ""}`));
+      } catch (err) {
+        $("search-results").replaceChildren(searchNote(err.message));
+        $("search-results").hidden = false;
+      }
+      return;
+    }
+    goToPlace({ ...it, kind: it.type === "coordinates" ? "coordinates" : "place" });
+  }
+  const ICONS = { field: "▦", place: "📍", coordinates: "⌖" };
   function renderSuggestions(res, q) {
     const list = $("search-results");
     list.replaceChildren();
-    let n = 0;
-    const item = (onclick, ...kids) => el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: `sugg-${n++}`, onclick }, ...kids));
-    if (res.fields.length) list.append(el("li", { class: "search-head", text: "Your fields" }));
-    for (const f of res.fields) {
-      list.append(item(() => goToField(f), el("strong", {}, ...highlight(f.name, q)), f.crop ? ` · ${f.crop}` : "",
-        f.match !== "name" ? el("span", { class: "muted", text: ` — ${fieldWhy(f)}` }) : null));
-    }
-    if (res.places.length) list.append(el("li", { class: "search-head", text: res.places[0].kind === "coordinates" ? "Coordinates" : "Suggestions" }));
-    for (const p of res.places) list.append(item(() => goToPlace(p), ...highlight(p.name, q)));
-    list.append(item(() => $("search-form").requestSubmit(), el("span", { class: "muted", text: `Search all results for “${q}” ↵` })));
-    if (res.error) list.append(searchNote(res.error));
+    res.items.forEach((it, n) => {
+      list.append(el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: `sugg-${n}`, class: `sugg sugg-${it.type}`,
+        onclick: () => pickSuggestion(it) },
+        el("span", { class: "sugg-icon", "aria-hidden": "true", text: ICONS[it.type] || "📍" }),
+        el("span", { class: "sugg-text" }, el("span", { class: "sugg-main" }, ...highlight(it.main, q)),
+          it.secondary ? el("span", { class: "sugg-sub", text: it.secondary }) : null))));
+    });
+    if (!res.items.length) list.append(searchNote(res.error || "No suggestions yet. Keep typing, or press Search."));
+    else if (res.error) list.append(searchNote(res.error));
+    if (res.source === "Google") list.append(el("li", { class: "sugg-credit", text: "Address suggestions by Google" }));
     list.hidden = false;
     $("search-input").setAttribute("aria-expanded", "true");
   }
   async function fetchSuggestions(q) {
     const seq = ++suggestSeq;
     const c = map.getCenter();
+    placeSession = placeSession || newSession();
     try {
-      const res = await api(`/api/search/suggest?q=${encodeURIComponent(q)}&lat=${c.lat.toFixed(3)}&lon=${c.lng.toFixed(3)}`);
+      const res = await api(`/api/search/suggest?q=${encodeURIComponent(q)}&lat=${c.lat.toFixed(3)}&lon=${c.lng.toFixed(3)}&session=${placeSession}`);
       if (seq !== suggestSeq || $("search-input").value.trim() !== q) return; // a newer keystroke won
+      state.suggestions = res.items;
       renderSuggestions(res, q);
-    } catch (_) { /* typing shouldn't show errors; Enter still runs the full search */ }
+    } catch (_) { /* typing shouldn't show errors; the Search button still runs the full search */ }
   }
   $("search-input").addEventListener("input", () => {
     clearTimeout(suggestTimer);
     const q = $("search-input").value.trim();
+    state.suggestions = [];
     if (q.length < 2) { suggestSeq++; closeSearch(); return; }
-    suggestTimer = setTimeout(() => fetchSuggestions(q), 250);
+    suggestTimer = setTimeout(() => fetchSuggestions(q), 200);
   });
   $("search-input").addEventListener("keydown", (e) => {
     const items = suggestItems();
@@ -438,7 +460,7 @@
     if ($("search-results").hidden || !items.length) return;
     if (e.key === "ArrowDown") { e.preventDefault(); setActive(Math.min(cur + 1, items.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActive(Math.max(cur - 1, -1)); }
-    else if (e.key === "Enter" && cur >= 0) { e.preventDefault(); clearTimeout(suggestTimer); items[cur].click(); }
+    else if (e.key === "Enter") { e.preventDefault(); clearTimeout(suggestTimer); items[Math.max(cur, 0)].click(); }
   });
   $("search-input").addEventListener("focus", () => {
     if ($("search-results").children.length && $("search-input").value.trim().length >= 2) $("search-results").hidden = false;

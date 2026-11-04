@@ -228,9 +228,23 @@ The search bar at the top of the map is always there. Type any of:
 - a town, road, or landmark: OpenStreetMap Nominatim (US only; set
   `FIELD_MONITOR_GEOCODE_COUNTRIES` to change, empty for worldwide).
 
-As you type, suggestions appear: your fields by name, the coordinates you typed, and places near
-the map view (from [Photon](https://photon.komoot.io), OpenStreetMap data, cached for a day;
-Nominatim's policy doesn't allow autocomplete). Use ↑/↓ and Enter, or press Enter for the full search.
+As you type, a dropdown shows the **5 most likely matches** in one list, like a maps search bar:
+typed coordinates, your fields whose name matches (at most 2 when addresses are also shown), then
+addresses and places near the map view. Use ↑/↓ and Enter (Enter alone picks the first suggestion);
+the **Search** button runs the full search.
+
+Address suggestions come from **Google Places** when you set your own key, otherwise from the free
+[Photon](https://photon.komoot.io) service (OpenStreetMap data, weaker on rural addresses):
+
+1. In Google Cloud Console, create a project with billing, enable **Places API (New)**, and create an
+   API key. Restrict the key to Places API (New) (and to your server's IP if you can).
+2. Set it in the environment where you run the app (never in code):
+   `export GOOGLE_MAPS_API_KEY=...` then `fieldmonitor serve`.
+3. Optional: `GOOGLE_PLACES_DAILY_LIMIT` (default 1000) caps Google calls per day; past it,
+   suggestions fall back to Photon. Also set a quota/budget alert in Cloud Console.
+
+Each search uses one Google session token: the suggestions while you type plus one Place Details
+call when you pick an address. The key stays on the server; the browser never sees it.
 
 Results list **your fields first**: the field the point falls in, then fields within 3 miles (by
 edge distance), then name matches. Tap a field to open it; tap a place to drop a pin there.
@@ -389,7 +403,8 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | POST | `/api/fields/{id}/sync` | Check for new imagery now (otherwise automatic every 12 h) |
 | GET | `/api/search?q=` | Map search: your fields (inside / within 3 mi / by name) plus places (coordinates, US Census addresses, Nominatim) |
 | GET | `/api/geocode?q=` | Places only (older clients) |
-| GET | `/api/search/suggest?q=&lat=&lon=` | Type-ahead suggestions (fields, coordinates, Photon places near lat/lon) |
+| GET | `/api/search/suggest?q=&lat=&lon=&session=` | Up to 5 suggestions: coordinates, your fields, Google (or Photon) addresses |
+| GET | `/api/search/place?id=&session=` | Location of a picked Google suggestion (ends the session) |
 | GET | `/api/fields/{id}/yield?year=` | Yield estimate with method, range, canopy signal, calibration |
 | POST | `/api/fields/{id}/yield/records` | Owner: add `expected`, `harvest`, or `count` (with inputs) |
 | POST | `/api/yield/count` | Calculate a field count without saving |
