@@ -41,6 +41,21 @@ date picker, and Data tab. A field with no clear image for two weeks says so pla
 image in the last 14 days (clouds). Last one: Sep 23.") instead of presenting old numbers as
 current.
 
+## Farms and team roles
+
+A **farm** holds fields, and people get **one role on the whole farm**: owner, operator,
+applicator, scout, or viewer (account menu → **Farm & team**). Your first field creates
+"<your name>'s farm". Owners can rename the farm, add people by their account email, change roles,
+remove people, create more farms (e.g. "Rented ground"), and move fields between farms they own.
+A farm always keeps at least one owner.
+
+For now, owners manage and every other role can see all the farm's fields; what operators,
+applicators, and scouts may change comes next. **Share** on a single field still works for outside
+people (an agronomist, a landlord): it opens only that field, never the rest of the farm.
+
+Existing data moves over automatically on startup: each owner's fields go onto their farm, and
+existing one-field shares stay one-field shares (nobody gains access to other fields).
+
 ## Accounts, sharing, and the marketplace
 
 > The marketplace is **paused** by default: the tab, listing endpoints, and listing feed items are
@@ -405,6 +420,11 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | GET | `/api/geocode?q=` | Places only (older clients) |
 | GET | `/api/search/suggest?q=&lat=&lon=&session=` | Up to 5 suggestions: coordinates, your fields, Google (or Photon) addresses |
 | GET | `/api/search/place?id=&session=` | Location of a picked Google suggestion (ends the session) |
+| GET/POST | `/api/farms` | Your farms (with your role and field ids) / create a farm |
+| PATCH | `/api/farms/{id}` | Owner: rename |
+| GET/POST | `/api/farms/{id}/members` | Team list / owner: add someone or change their role `{email, role}` |
+| DELETE | `/api/farms/{id}/members/{user_id}` | Owner: remove someone; anyone: leave |
+| POST | `/api/farms/{id}/fields` | Owner: move fields you own onto this farm |
 | GET | `/api/fields/{id}/yield?year=` | Yield estimate with method, range, canopy signal, calibration |
 | POST | `/api/fields/{id}/yield/records` | Owner: add `expected`, `harvest`, or `count` (with inputs) |
 | POST | `/api/yield/count` | Calculate a field count without saving |

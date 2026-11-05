@@ -38,6 +38,9 @@ ROLE_LABELS = {
     "dealer": "Input & equipment dealer",
     "buyer": "Crop buyer",
 }
+# Roles on a farm, most to least. For now only "owner" manages fields; the others can view.
+FARM_ROLES = ("owner", "operator", "applicator", "scout", "viewer")
+ROLE_RANK = {r: len(FARM_ROLES) - i for i, r in enumerate(FARM_ROLES)}
 _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,}$")
 MIN_PASSWORD = 10
 
@@ -75,6 +78,26 @@ CREATE TABLE IF NOT EXISTS field_access (
   created TEXT NOT NULL,
   PRIMARY KEY (field_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS farms (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_by TEXT NOT NULL REFERENCES users(id),
+  created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS farm_members (
+  farm_id TEXT NOT NULL REFERENCES farms(id),
+  user_id TEXT NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'applicator', 'scout', 'viewer')),
+  created TEXT NOT NULL,
+  PRIMARY KEY (farm_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS farm_members_by_user ON farm_members(user_id);
+CREATE TABLE IF NOT EXISTS farm_fields (
+  field_id TEXT PRIMARY KEY,
+  farm_id TEXT NOT NULL REFERENCES farms(id),
+  added TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS farm_fields_by_farm ON farm_fields(farm_id);
 CREATE TABLE IF NOT EXISTS listings (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
@@ -176,6 +199,7 @@ class Accounts:
         self._local = threading.local()
         with self.db() as c:
             c.executescript(SCHEMA)
+        self.migrate_to_farms()
         self.login_limiter = RateLimiter()
 
     @contextmanager
@@ -317,8 +341,109 @@ class Accounts:
         assert p
         return p
 
+    # ---- farms -----------------------------------------------------------------
+    # A farm holds fields; people get one role on the whole farm. What each role may do beyond
+    # "owner manages, everyone else reads" is decided later (see FARM_ROLES).
+    def create_farm(self, name: str, owner_id: str) -> dict[str, Any]:
+        fid = new_id("farm")
+        with self.db() as c:
+            c.execute("INSERT INTO farms (id, name, created_by, created) VALUES (?,?,?,?)", (fid, name.strip()[:120], owner_id, now()))
+            c.execute("INSERT INTO farm_members (farm_id, user_id, role, created) VALUES (?,?, 'owner', ?)", (fid, owner_id, now()))
+        return self.get_farm(fid)  # type: ignore[return-value]
+
+    def get_farm(self, farm_id: str) -> dict[str, Any] | None:
+        with self.db() as c:
+            row = c.execute("SELECT * FROM farms WHERE id=?", (farm_id,)).fetchone()
+        return dict(row) if row else None
+
+    def rename_farm(self, farm_id: str, name: str) -> dict[str, Any]:
+        with self.db() as c:
+            c.execute("UPDATE farms SET name=? WHERE id=?", (name.strip()[:120], farm_id))
+        return self.get_farm(farm_id)  # type: ignore[return-value]
+
+    def farms_for(self, user_id: str) -> list[dict[str, Any]]:
+        with self.db() as c:
+            rows = c.execute(
+                "SELECT f.*, m.role, (SELECT COUNT(*) FROM farm_fields ff WHERE ff.farm_id=f.id) AS field_count "
+                "FROM farms f JOIN farm_members m ON m.farm_id=f.id WHERE m.user_id=? ORDER BY m.role='owner' DESC, f.name",
+                (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def farm_role(self, farm_id: str, user_id: str) -> str | None:
+        with self.db() as c:
+            row = c.execute("SELECT role FROM farm_members WHERE farm_id=? AND user_id=?", (farm_id, user_id)).fetchone()
+        return row["role"] if row else None
+
+    def farm_members(self, farm_id: str) -> list[dict[str, Any]]:
+        with self.db() as c:
+            rows = c.execute(
+                "SELECT m.user_id, m.role, m.created, p.display_name, u.email FROM farm_members m "
+                "JOIN profiles p ON p.user_id=m.user_id JOIN users u ON u.id=m.user_id WHERE m.farm_id=? "
+                "ORDER BY m.role='owner' DESC, p.display_name", (farm_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_farm_member(self, farm_id: str, user_id: str, role: str) -> None:
+        if role not in FARM_ROLES:
+            raise ValueError(f"role must be one of {', '.join(FARM_ROLES)}")
+        with self.db() as c:
+            cur = c.execute("SELECT role FROM farm_members WHERE farm_id=? AND user_id=?", (farm_id, user_id)).fetchone()
+            if cur and cur["role"] == "owner" and role != "owner" and self._owner_count(c, farm_id) == 1:
+                raise ValueError("A farm needs at least one owner.")
+            c.execute("INSERT INTO farm_members (farm_id, user_id, role, created) VALUES (?,?,?,?) "
+                      "ON CONFLICT(farm_id, user_id) DO UPDATE SET role=excluded.role", (farm_id, user_id, role, now()))
+
+    def remove_farm_member(self, farm_id: str, user_id: str) -> None:
+        with self.db() as c:
+            cur = c.execute("SELECT role FROM farm_members WHERE farm_id=? AND user_id=?", (farm_id, user_id)).fetchone()
+            if cur and cur["role"] == "owner" and self._owner_count(c, farm_id) == 1:
+                raise ValueError("A farm needs at least one owner.")
+            c.execute("DELETE FROM farm_members WHERE farm_id=? AND user_id=?", (farm_id, user_id))
+
+    @staticmethod
+    def _owner_count(c: sqlite3.Connection, farm_id: str) -> int:
+        return int(c.execute("SELECT COUNT(*) FROM farm_members WHERE farm_id=? AND role='owner'", (farm_id,)).fetchone()[0])
+
+    def default_farm(self, user_id: str) -> dict[str, Any]:
+        """The user's first farm they own, created on first need ("<name>'s farm")."""
+        owned = [f for f in self.farms_for(user_id) if f["role"] == "owner"]
+        if owned:
+            return min(owned, key=lambda f: f["created"])
+        p = self.profile(user_id, private=True) or {}
+        return self.create_farm(f"{p.get('display_name') or 'My'}'s farm", user_id)
+
+    def farm_of(self, field_id: str) -> str | None:
+        with self.db() as c:
+            row = c.execute("SELECT farm_id FROM farm_fields WHERE field_id=?", (field_id,)).fetchone()
+        return row["farm_id"] if row else None
+
+    def farm_field_ids(self, farm_id: str) -> list[str]:
+        with self.db() as c:
+            return [r["field_id"] for r in c.execute("SELECT field_id FROM farm_fields WHERE farm_id=? ORDER BY added", (farm_id,))]
+
+    def add_field_to_farm(self, field_id: str, farm_id: str) -> None:
+        """Put a field on a farm (moves it if it was on another farm)."""
+        with self.db() as c:
+            c.execute("INSERT INTO farm_fields (field_id, farm_id, added) VALUES (?,?,?) "
+                      "ON CONFLICT(field_id) DO UPDATE SET farm_id=excluded.farm_id, added=excluded.added", (field_id, farm_id, now()))
+
+    def migrate_to_farms(self) -> int:
+        """One-time, repeat-safe: each field owner's fields go onto their default farm.
+        One-field shares stay one-field shares, so nobody gains access to other fields."""
+        with self.db() as c:
+            rows = c.execute("SELECT fa.field_id, fa.user_id FROM field_access fa LEFT JOIN farm_fields ff ON ff.field_id=fa.field_id "
+                             "WHERE fa.role='owner' AND ff.field_id IS NULL ORDER BY fa.created").fetchall()
+        for r in rows:
+            self.add_field_to_farm(r["field_id"], self.default_farm(r["user_id"])["id"])
+        return len(rows)
+
     # ---- field access --------------------------------------------------------
+    # A person's role on a field is the higher of (a) their role on the field's farm and (b) a
+    # one-field share. Legacy per-field "owner" rows only count for fields not yet on a farm.
     def grant(self, field_id: str, user_id: str, role: str) -> None:
+        if role == "owner":
+            if self.farm_of(field_id) is None:
+                self.add_field_to_farm(field_id, self.default_farm(user_id)["id"])
+            return
         with self.db() as c:
             c.execute(
                 "INSERT INTO field_access (field_id, user_id, role, created) VALUES (?,?,?,?) "
@@ -331,26 +456,55 @@ class Accounts:
             c.execute("DELETE FROM field_access WHERE field_id=? AND user_id=? AND role!='owner'", (field_id, user_id))
 
     def access(self, field_id: str, user_id: str) -> str | None:
-        with self.db() as c:
-            row = c.execute("SELECT role FROM field_access WHERE field_id=? AND user_id=?", (field_id, user_id)).fetchone()
-        return row["role"] if row else None
+        return self.fields_for(user_id, only=field_id).get(field_id)
 
-    def fields_for(self, user_id: str) -> dict[str, str]:
+    def fields_for(self, user_id: str, only: str | None = None) -> dict[str, str]:
+        out: dict[str, str] = {}
+
+        def put(fid: str, role: str) -> None:
+            if fid not in out or ROLE_RANK[role] > ROLE_RANK[out[fid]]:
+                out[fid] = role
+
+        flt, args = (" AND ff.field_id=?", [only]) if only else ("", [])
         with self.db() as c:
-            return {r["field_id"]: r["role"] for r in c.execute("SELECT field_id, role FROM field_access WHERE user_id=?", (user_id,))}
+            for r in c.execute("SELECT ff.field_id, m.role FROM farm_fields ff JOIN farm_members m ON m.farm_id=ff.farm_id "
+                               f"WHERE m.user_id=?{flt}", [user_id, *args]):
+                put(r["field_id"], r["role"])
+            flt2 = " AND fa.field_id=?" if only else ""
+            for r in c.execute("SELECT fa.field_id, fa.role, ff.farm_id FROM field_access fa "
+                               f"LEFT JOIN farm_fields ff ON ff.field_id=fa.field_id WHERE fa.user_id=?{flt2}", [user_id, *args]):
+                if r["role"] == "owner" and r["farm_id"] is not None:
+                    continue  # the farm decides ownership now
+                put(r["field_id"], r["role"])
+        return out
 
     def field_members(self, field_id: str) -> list[dict[str, Any]]:
+        """Everyone who can see the field: farm members (via='farm') and one-field shares (via='field')."""
+        out: dict[str, dict[str, Any]] = {}
+        farm = self.farm_of(field_id)
+        if farm:
+            for m in self.farm_members(farm):
+                out[m["user_id"]] = {"user_id": m["user_id"], "role": m["role"], "display_name": m["display_name"],
+                                     "email": m["email"], "via": "farm"}
         with self.db() as c:
             rows = c.execute(
                 "SELECT fa.user_id, fa.role, p.display_name, u.email FROM field_access fa "
-                "JOIN profiles p ON p.user_id=fa.user_id JOIN users u ON u.id=fa.user_id WHERE fa.field_id=? ORDER BY fa.role='owner' DESC, p.display_name",
-                (field_id,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+                "JOIN profiles p ON p.user_id=fa.user_id JOIN users u ON u.id=fa.user_id WHERE fa.field_id=?", (field_id,)).fetchall()
+        for r in rows:
+            if r["role"] == "owner" and farm:
+                continue
+            if r["user_id"] not in out or ROLE_RANK[r["role"]] > ROLE_RANK[out[r["user_id"]]["role"]]:
+                out[r["user_id"]] = {**dict(r), "via": "field"}
+        return sorted(out.values(), key=lambda m: (-ROLE_RANK[m["role"]], m["display_name"] or ""))
 
     def owner_of(self, field_id: str) -> str | None:
+        farm = self.farm_of(field_id)
         with self.db() as c:
-            row = c.execute("SELECT user_id FROM field_access WHERE field_id=? AND role='owner'", (field_id,)).fetchone()
+            if farm:
+                row = c.execute("SELECT user_id FROM farm_members WHERE farm_id=? AND role='owner' ORDER BY created LIMIT 1",
+                                (farm,)).fetchone()
+            else:
+                row = c.execute("SELECT user_id FROM field_access WHERE field_id=? AND role='owner'", (field_id,)).fetchone()
         return row["user_id"] if row else None
 
     def claim_unowned(self, field_ids: list[str], user_id: str) -> list[str]:
