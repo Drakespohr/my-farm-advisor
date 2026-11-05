@@ -42,7 +42,7 @@ CREATE TRIGGER IF NOT EXISTS log_no_delete BEFORE DELETE ON log_events
   BEGIN SELECT RAISE(ABORT, 'log_events is append-only: add a correction instead'); END;
 """
 
-WRITE_ROLES = ("owner", "operator", "applicator", "scout")
+WRITE_ROLES = ("owner", "operator", "applicator", "agronomist")
 SOURCES = ("manual", "chat", "photo", "import")
 
 

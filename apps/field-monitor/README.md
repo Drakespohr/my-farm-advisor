@@ -44,16 +44,17 @@ current.
 ## Farms and team roles
 
 A **farm** holds fields, and people get **one role on the whole farm**: owner, operator,
-applicator, scout, or viewer (account menu → **Farm & team**). Your first field creates
+applicator, agronomist, or viewer (account menu → **Farm & team**). Your first field creates
 "<your name>'s farm". Owners can rename the farm, add people by their account email, change roles,
 remove people, create more farms (e.g. "Rented ground"), and move fields between farms they own.
 A farm always keeps at least one owner.
 
-For now, owners manage and every other role can see all the farm's fields; what operators,
-applicators, and scouts may change comes next. **Share** on a single field still works for outside
-people (an agronomist, a landlord): it opens only that field, never the rest of the farm.
+Owners manage the farm, team, and fields. Operators, applicators, and **agronomists** can also add,
+correct, and void log records; viewers can only look. **Share** on a single field still works for
+outside people (a landlord, a lender): it opens only that field, read-only, never the rest of the farm.
 
-Existing data moves over automatically on startup: each owner's fields go onto their farm, and
+Existing data moves over automatically on startup (and any "scout" from earlier versions becomes an
+"agronomist"): each owner's fields go onto their farm, and
 existing one-field shares stay one-field shares (nobody gains access to other fields).
 
 ## Farm and field log
@@ -67,7 +68,7 @@ and notes. Notes, rainfall, water tests, and manure tests can be farm-wide; the 
 field. Every entry is checked by the same rules as `apps/ag-inputs` (copied into `records.py`),
 including restricted-use sprays needing an EPA number and the record-keeping deadline badge.
 
-- **Who can add:** owner, operator, applicator, scout. Viewers and one-field shares can read only.
+- **Who can add, correct, and void:** owner, operator, applicator, agronomist. Viewers and one-field shares can read only.
 - **Never edited or deleted** (the database refuses): **Correct** adds a new version that replaces
   the old one in the log; **Void** withdraws a mistake. History stays (`?history=true`).
 - Each entry records who logged it and how (`manual`, later `chat`, `photo`, `import`).

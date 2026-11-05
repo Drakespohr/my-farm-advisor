@@ -64,7 +64,7 @@
     team.append(list);
     if (isOwner) {
       const email = el("input", { type: "email", required: "", placeholder: "their account email", autocomplete: "off" });
-      const role = el("select", {}, roleInfo.roles.filter((r) => r !== "owner").concat("owner").map((r) => el("option", { value: r, text: r, ...(r === "scout" ? { selected: "" } : {}) })));
+      const role = el("select", {}, roleInfo.roles.filter((r) => r !== "owner").concat("owner").map((r) => el("option", { value: r, text: r, ...(r === "agronomist" ? { selected: "" } : {}) })));
       const form = el("form", { class: "row gap wrap end" }, el("label", { class: "grow" }, "Add someone", email), el("label", {}, "Role", role),
         el("button", { class: "btn primary", type: "submit", text: "Add" }));
       form.addEventListener("submit", async (e) => {
@@ -76,7 +76,7 @@
     }
     team.append(tmsg, el("details", { class: "small" }, el("summary", { text: "What the roles mean" }),
       el("ul", { class: "bullets" }, roleInfo.roles.map((r) => el("li", { text: roleInfo.labels[r] }))),
-      el("p", { class: "muted", text: "For now owners manage the farm and everyone else can see its fields. What each role can change comes next." })));
+      el("p", { class: "muted", text: "Owners manage the farm, team, and fields. Operators, applicators, and agronomists can also add and correct log records. Viewers can only look." })));
     p.append(team);
 
     // Farm log: everything on the farm, farm-level and every field
