@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+os.environ.setdefault("FIELD_MONITOR_ROAD_INDEX", "0")  # tests never download Census road files
 from affine import Affine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

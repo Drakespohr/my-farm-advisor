@@ -106,6 +106,23 @@ class Counties:
             self._tree = STRtree(geoms)
             self._geoms = geoms
 
+    def near(self, lat: float, lon: float, radius_km: float) -> list[dict[str, Any]]:
+        """Counties within `radius_km` of a point (the one containing it first)."""
+        self._load()
+        assert self._tree is not None
+        import math
+        dlat = radius_km / 111.0
+        dlon = dlat / max(0.2, math.cos(math.radians(lat)))
+        pt = Point(lon, lat)
+        from shapely.geometry import box as _box
+        hits = []
+        for i in self._tree.query(_box(lon - dlon, lat - dlat, lon + dlon, lat + dlat)):
+            g = self._geoms[int(i)]
+            d = g.distance(pt)  # degrees; good enough to rank and filter at county scale
+            hits.append((0.0 if g.contains(pt) else d, self._props[int(i)]))
+        hits.sort(key=lambda h: h[0])
+        return [p for d, p in hits if d * 111.0 <= radius_km]
+
     def lookup(self, lat: float, lon: float) -> dict[str, Any] | None:
         try:
             self._load()

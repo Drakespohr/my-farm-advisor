@@ -86,7 +86,7 @@
     for (const url of SERVERS) {
       try {
         const ctl = new AbortController();
-        const timer = setTimeout(() => ctl.abort(), 20000);
+        const timer = setTimeout(() => ctl.abort(), 8000);  // backup path: fail fast
         const r = await fetch(url, { method: "POST", body: new URLSearchParams({ data: ql }), signal: ctl.signal });
         clearTimeout(timer);
         if (!r.ok) throw new Error(`${url.split("/")[2]} answered ${r.status}`);

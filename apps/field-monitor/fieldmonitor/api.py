@@ -8,6 +8,7 @@ import csv
 import io
 import logging
 import os
+import threading
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
@@ -29,6 +30,7 @@ from . import search as mapsearch
 from . import planting, survey, yields
 from .planting import SoilWeather
 from .intersections import Intersections
+from .roads import RoadIndex
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
 from .news import News
@@ -161,6 +163,23 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                                   countries=os.getenv("FIELD_MONITOR_GEOCODE_COUNTRIES", "us"))
     app.state.geocoder = geocoder
     app.state.intersections = Intersections(f"my-farm-advisor-field-monitor/{__version__}")
+    app.state.intersections.road_index = RoadIndex(store.root / "cache", news.counties,
+                                                   user_agent=f"my-farm-advisor-field-monitor/{__version__}")
+
+    def index_roads_near_fields(field_ids: list[str] | None = None) -> None:
+        """Download road names for counties around fields (background) so crossroads search is instant."""
+        def run() -> None:
+            try:
+                fs = [store.get_field(i) for i in field_ids] if field_ids else store.list_fields()
+                pts = [(shape(f["geometry"]).centroid.y, shape(f["geometry"]).centroid.x) for f in fs]
+                app.state.intersections.road_index.ensure_near(pts)
+            except Exception as exc:
+                log.warning("road index prefetch failed: %s", exc.__class__.__name__)
+        if os.getenv("FIELD_MONITOR_ROAD_INDEX", "1") != "0":
+            threading.Thread(target=run, daemon=True, name="road-index-prefetch").start()
+
+    app.state.index_roads_near_fields = index_roads_near_fields
+    index_roads_near_fields()  # on startup: counties around every field (skips ones already indexed)
     # Google Places suggestions are used only when the owner sets their own key in the environment.
     _gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     app.state.google_places = mapsearch.GooglePlaces(
@@ -346,6 +365,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
                 errors.append({"feature": n, "name": name, "error": str(exc)})
         if errors and not (created or existing):
             raise HTTPException(400, {"errors": errors})
+        if created:
+            index_roads_near_fields(created)
         syncing, queued = [], []
         if body.auto_sync and created:
             # The first few start right away in parallel; the rest are queued and run one after

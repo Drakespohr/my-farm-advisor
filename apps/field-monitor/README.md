@@ -321,8 +321,12 @@ The search bar at the top of the map is always there. Type any of:
 - coordinates: `40.9245, -98.348`, `40.9245 N, 98.348 W`, `40°55'28"N 98°20'53"W`, or GIS order
   `-98.348, 40.9245`. If you drop the minus sign on a US longitude, it also offers the west point;
 - a street address (`1234 Road 12, Aurora NE`): US Census Bureau geocoder;
-- a crossroads (`250th and Waverly Road`, `250th & Waverly Rd`, `Hwy 6 / 148th`): the two roads are
-  looked up in OpenStreetMap ([Overpass API](https://overpass-api.de), free with fair use) within
+- a crossroads (`250th and Waverly Road`, `250th & Waverly Rd`, `Hwy 6 / 148th`): answered **instantly
+  from our own road index** — the US Census Bureau's TIGER/Line road files (public domain, every
+  public road with its signed name) for the counties within 30 miles of your fields, downloaded once
+  in the background (a few MB per county) when the app starts or a field is added. Numbers must
+  match exactly (250th never matches 25th); words can be misspelled or partly typed. Until an area's
+  index is ready (about a minute), or outside it, the roads are looked up in OpenStreetMap ([Overpass API](https://overpass-api.de), free with fair use) within
   about 35 miles of the map view (or your fields) and the crossing nearest you is listed first, with
   its distance. Partial names work while typing ("250th and wav"). If Overpass can't be reached
   (some networks block it), or finds nothing, Photon's typo-tolerant road search is used instead
