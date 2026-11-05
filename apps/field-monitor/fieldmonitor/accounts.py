@@ -39,7 +39,7 @@ ROLE_LABELS = {
     "buyer": "Crop buyer",
 }
 # Roles on a farm, most to least. For now only "owner" manages fields; the others can view.
-FARM_ROLES = ("owner", "operator", "applicator", "scout", "viewer")
+FARM_ROLES = ("owner", "operator", "applicator", "agronomist", "viewer")
 ROLE_RANK = {r: len(FARM_ROLES) - i for i, r in enumerate(FARM_ROLES)}
 _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,}$")
 MIN_PASSWORD = 10
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS farms (
 CREATE TABLE IF NOT EXISTS farm_members (
   farm_id TEXT NOT NULL REFERENCES farms(id),
   user_id TEXT NOT NULL REFERENCES users(id),
-  role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'applicator', 'scout', 'viewer')),
+  role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'applicator', 'agronomist', 'viewer')),
   created TEXT NOT NULL,
   PRIMARY KEY (farm_id, user_id)
 );
@@ -199,6 +199,7 @@ class Accounts:
         self._local = threading.local()
         with self.db() as c:
             c.executescript(SCHEMA)
+        self._rename_scout_role()
         self.migrate_to_farms()
         self.login_limiter = RateLimiter()
 
@@ -425,6 +426,28 @@ class Accounts:
         with self.db() as c:
             c.execute("INSERT INTO farm_fields (field_id, farm_id, added) VALUES (?,?,?) "
                       "ON CONFLICT(field_id) DO UPDATE SET farm_id=excluded.farm_id, added=excluded.added", (field_id, farm_id, now()))
+
+    def _rename_scout_role(self) -> None:
+        """The "scout" role became "agronomist". SQLite can't change a CHECK constraint in place,
+        so rebuild farm_members once (same rows; scout -> agronomist). Repeat-safe."""
+        with self.db() as c:
+            row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='farm_members'").fetchone()
+            if not row or "'scout'" not in row["sql"]:
+                return
+            c.executescript("""
+                CREATE TABLE farm_members_new (
+                  farm_id TEXT NOT NULL REFERENCES farms(id),
+                  user_id TEXT NOT NULL REFERENCES users(id),
+                  role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'applicator', 'agronomist', 'viewer')),
+                  created TEXT NOT NULL,
+                  PRIMARY KEY (farm_id, user_id)
+                );
+                INSERT INTO farm_members_new (farm_id, user_id, role, created)
+                  SELECT farm_id, user_id, CASE role WHEN 'scout' THEN 'agronomist' ELSE role END, created FROM farm_members;
+                DROP TABLE farm_members;
+                ALTER TABLE farm_members_new RENAME TO farm_members;
+                CREATE INDEX IF NOT EXISTS farm_members_by_user ON farm_members(user_id);
+            """)
 
     def migrate_to_farms(self) -> int:
         """One-time, repeat-safe: each field owner's fields go onto their default farm.

@@ -1,6 +1,6 @@
 """Farms and team roles: a farm holds fields, and people get one role on the whole farm.
 
-Roles: owner, operator, applicator, scout, viewer. For now, owners manage the farm (name, team,
+Roles: owner, operator, applicator, agronomist, viewer. For now, owners manage the farm (name, team,
 fields) and everyone else can see its fields; what each role may change is decided later.
 Fields can still be shared one at a time with an outside person (e.g. an agronomist); that only
 opens that field, never the rest of the farm.
@@ -20,7 +20,7 @@ ROLE_LABELS = {
     "owner": "Owner — manages the farm, team, and fields",
     "operator": "Operator — runs day-to-day work",
     "applicator": "Applicator — applies fertilizer and sprays",
-    "scout": "Scout — walks fields and reports",
+    "agronomist": "Agronomist — scouts fields, adds and corrects log records, advises",
     "viewer": "Viewer — read only",
 }
 
@@ -31,7 +31,7 @@ class FarmIn(BaseModel):
 
 class MemberIn(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
-    role: str = Field(..., pattern="^(owner|operator|applicator|scout|viewer)$")
+    role: str = Field(..., pattern="^(owner|operator|applicator|agronomist|viewer)$")
 
 
 class MoveFieldsIn(BaseModel):

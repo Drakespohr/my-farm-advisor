@@ -6,7 +6,7 @@
   const FM = window.FM;
   const { el, api } = FM;
   let kindsInfo = null;
-  const WRITE_ROLES = ["owner", "operator", "applicator", "scout"];
+  const WRITE_ROLES = ["owner", "operator", "applicator", "agronomist"];
 
   // Most specific first: "_bu_per_ac" before "_per_ac".
   const UNITS = [[/_k_per_ac$/, "k/ac"], [/_lb_per_ac$/, "lb/ac"], [/_bu_per_ac$/, "bu/ac"], [/_gal_per_ac$/, "gal/ac"], [/_per_ac$/, "/ac"],

@@ -48,10 +48,10 @@ def test_team_member_sees_every_farm_field_with_their_role(app):
     farm = owner.get("/api/farms").json()[0]["id"]
     scout, scout_id = person(app, "sam@x.co", "Sam Scout")
     assert scout.get(f"/api/fields/{a}").status_code == 404  # not on the team yet
-    r = owner.post(f"/api/farms/{farm}/members", json={"email": "sam@x.co", "role": "scout"})
-    assert r.status_code == 201 and {m["email"]: m["role"] for m in r.json()}["sam@x.co"] == "scout"
+    r = owner.post(f"/api/farms/{farm}/members", json={"email": "sam@x.co", "role": "agronomist"})
+    assert r.status_code == 201 and {m["email"]: m["role"] for m in r.json()}["sam@x.co"] == "agronomist"
     seen = {f["id"]: f["my_role"] for f in scout.get("/api/fields").json()}
-    assert seen == {a: "scout", b: "scout"}
+    assert seen == {a: "agronomist", b: "agronomist"}
     # For now only owners manage: a scout can look but not change the farm or its fields.
     assert scout.post(f"/api/fields/{a}/sync").status_code == 403
     assert scout.post(f"/api/farms/{farm}/members", json={"email": "olive@x.co", "role": "viewer"}).status_code == 403
@@ -80,7 +80,7 @@ def test_unknown_people_and_farms(app):
     owner, _ = person(app, "olive@x.co", "Olive Owner")
     add_field(owner, "A")
     farm = owner.get("/api/farms").json()[0]["id"]
-    assert owner.post(f"/api/farms/{farm}/members", json={"email": "nobody@x.co", "role": "scout"}).status_code == 404
+    assert owner.post(f"/api/farms/{farm}/members", json={"email": "nobody@x.co", "role": "agronomist"}).status_code == 404
     other, _ = person(app, "ned@x.co", "Ned Neighbor")
     assert other.get(f"/api/farms/{farm}/members").status_code == 404
     assert owner.post(f"/api/farms/{farm}/members", json={"email": "ned@x.co", "role": "boss"}).status_code == 422
@@ -119,12 +119,12 @@ def test_redraw_stays_on_the_farm(app):
     a = add_field(owner, "A")
     farm = owner.get("/api/farms").json()[0]["id"]
     scout, _ = person(app, "sam@x.co", "Sam Scout")
-    owner.post(f"/api/farms/{farm}/members", json={"email": "sam@x.co", "role": "scout"})
+    owner.post(f"/api/farms/{farm}/members", json={"email": "sam@x.co", "role": "agronomist"})
     agro, _ = person(app, "al@x.co", "Al Agronomist")
     owner.post(f"/api/fields/{a}/members", json={"email": "al@x.co"})
     new = owner.post(f"/api/fields/{a}/redraw", json={"geojson": mapping(translate(shape(FIELD), xoff=0.001))}).json()["field"]["id"]
     assert set(owner.get("/api/farms").json()[0]["field_ids"]) == {a, new}
-    assert scout.get(f"/api/fields/{new}").json()["my_role"] == "scout"
+    assert scout.get(f"/api/fields/{new}").json()["my_role"] == "agronomist"
     assert agro.get(f"/api/fields/{new}").json()["my_role"] == "viewer"
 
 
@@ -145,3 +145,28 @@ def test_existing_owners_and_shares_migrate_without_widening_access(tmp_path):
     assert acc2.fields_for(olive["id"]) == {"a": "owner", "b": "owner"}
     assert acc2.fields_for(al["id"]) == {"a": "viewer"}  # still only the one shared field
     assert Accounts(db).migrate_to_farms() == 0  # repeat-safe
+
+
+def test_old_scout_role_becomes_agronomist(tmp_path):
+    import sqlite3
+    db = tmp_path / "app.db"
+    acc = Accounts(db)
+    olive = acc.register("olive@x.co", "correct horse 1", "Olive Owner", ["farmer"])
+    sam = acc.register("sam@x.co", "correct horse 1", "Sam Scout", ["farmer"])
+    farm = acc.create_farm("Home", olive["id"])["id"]
+    with acc.db() as c:  # rebuild the table the way the previous version created it
+        c.executescript("""
+            DROP TABLE farm_members;
+            CREATE TABLE farm_members (farm_id TEXT NOT NULL REFERENCES farms(id), user_id TEXT NOT NULL REFERENCES users(id),
+              role TEXT NOT NULL CHECK (role IN ('owner', 'operator', 'applicator', 'scout', 'viewer')),
+              created TEXT NOT NULL, PRIMARY KEY (farm_id, user_id));
+        """)
+        c.execute("INSERT INTO farm_members VALUES (?,?,?,?)", (farm, olive["id"], "owner", now()))
+        c.execute("INSERT INTO farm_members VALUES (?,?,?,?)", (farm, sam["id"], "scout", now()))
+    acc2 = Accounts(db)
+    assert acc2.farm_role(farm, sam["id"]) == "agronomist" and acc2.farm_role(farm, olive["id"]) == "owner"
+    acc2.set_farm_member(farm, sam["id"], "agronomist")  # new CHECK accepts it
+    with pytest.raises(sqlite3.IntegrityError):
+        with acc2.db() as c:
+            c.execute("UPDATE farm_members SET role='scout' WHERE user_id=?", (sam["id"],))
+    Accounts(db)  # repeat-safe

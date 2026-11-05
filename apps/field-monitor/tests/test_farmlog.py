@@ -86,7 +86,7 @@ def test_roles_who_can_write_and_read(app):  # noqa: F811
     scout, _ = person(app, "sam@x.co", "Sam Scout")
     viewer, _ = person(app, "vi@x.co", "Vi Viewer")
     agro, _ = person(app, "al@x.co", "Al Agronomist")
-    owner.post(f"/api/farms/{farm}/members", json={"email": "sam@x.co", "role": "scout"})
+    owner.post(f"/api/farms/{farm}/members", json={"email": "sam@x.co", "role": "agronomist"})
     owner.post(f"/api/farms/{farm}/members", json={"email": "vi@x.co", "role": "viewer"})
     owner.post(f"/api/fields/{a}/members", json={"email": "al@x.co"})  # one-field share
     assert log(scout, farm, field_id=a, kind="scouting", details={"target": "rootworm beetles", "category": "insect",
@@ -105,3 +105,15 @@ def test_kinds_endpoint_describes_forms(app):  # noqa: F811
     k = owner.get("/api/log/kinds").json()
     assert "note" in k["farm_level"] and k["schemas"]["fertilizer"]["label"] == "Fertilizer / manure applied"
     assert "rate_lb_per_ac" in k["schemas"]["fertilizer"]["properties"]
+
+
+def test_agronomist_can_correct_and_void_owner_entries(app):  # noqa: F811
+    owner, farm, a, _ = setup_farm(app)
+    agro, _ = person(app, "ana@x.co", "Ana Agronomist")
+    owner.post(f"/api/farms/{farm}/members", json={"email": "ana@x.co", "role": "agronomist"})
+    orig = log(owner, farm, field_id=a, kind="scouting", details={"target": "gray leaf spot", "category": "disease",
+               "incidence_pct": 20, "pattern": "field_wide"}).json()
+    fix = log(agro, farm, kind="scouting", supersedes_id=orig["id"], details={"target": "northern corn leaf blight",
+              "category": "disease", "incidence_pct": 20, "pattern": "field_wide"})
+    assert fix.status_code == 201 and fix.json()["recorded_by_name"] == "Ana Agronomist"
+    assert log(agro, farm, kind="scouting", supersedes_id=fix.json()["id"], void=True).status_code == 201
