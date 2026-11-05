@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS pressure_history (
   field_id TEXT NOT NULL, day TEXT NOT NULL, score INTEGER, level TEXT, top TEXT, PRIMARY KEY (field_id, day)
 );
 """
-NEAR_KM = 160  # "near me" = within ~100 miles of one of my fields
+NEAR_MILES = 100  # "near me" = within 100 miles of one of my fields
+NEAR_KM = NEAR_MILES * 1.609344
 EXTRA_DISEASES = {"other_disease": "Other disease", "insect": "Insect pest", "weed": "Weed escape", "hail": "Hail / storm damage"}
 
 
@@ -397,18 +398,12 @@ def make_router(
                               "helpful": x["helpful"], "mine": bool(x["mine"]), "comments": x["comments"],
                               "disease": x["disease"], "severity": x["severity"], "observed": x["observed"], "place": x.get("place")})
 
-        storms_shown = 0
         if section in ("all", "local", "national"):
             for n in news.items(since):
                 if n["scope"] == "local":
-                    if section == "national" or n["lat"] is None:
+                    # Weather (storm reports) only within 100 miles of a field you can see, on every tab.
+                    if section == "national" or n["lat"] is None or not near(n["lat"], n["lon"]):
                         continue
-                    if section == "local" and not near(n["lat"], n["lon"]):
-                        continue
-                    if section == "all":
-                        storms_shown += 1
-                        if storms_shown > 15:  # everywhere-storms can number hundreds a day; keep the shared view readable
-                            continue
                     d = dist_km(pts, n["lat"], n["lon"])
                     items.append({"type": "storm", "id": n["id"], "time": n["published"], "title": n["title"], "body": n["summary"],
                                   "source": n["source_name"], "miles": round(d * 0.621) if d is not None else None, "place": n["place"]})

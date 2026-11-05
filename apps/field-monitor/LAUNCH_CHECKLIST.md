@@ -16,6 +16,8 @@ provider's site before budgeting.**
 - [ ] Decide whether Photon (free OpenStreetMap suggestions, fair use) stays as the fallback or is
       self-hosted at higher volume.
 - [ ] Check the **Esri World Imagery** basemap terms for commercial use (the map's satellite tiles).
+- [ ] Crossroads search uses the public **Overpass API** (OpenStreetMap, fair use). At customer
+      volume, run our own Overpass instance or a paid provider and set `FIELD_MONITOR_OVERPASS_URL`.
 
 ## Rules to verify (they are TODO in the code, never guessed)
 

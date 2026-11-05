@@ -362,7 +362,8 @@
     list.hidden = false;
     list.replaceChildren(searchNote("Searching…"));
     try {
-      const res = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      const c = map.getCenter();
+      const res = await api(`/api/search?q=${encodeURIComponent(q)}&lat=${c.lat.toFixed(3)}&lon=${c.lng.toFixed(3)}`);
       list.replaceChildren();
       if (res.fields.length) list.append(el("li", { class: "search-head", text: "Your fields" }));
       for (const f of res.fields) {
@@ -418,14 +419,14 @@
     }
     goToPlace({ ...it, kind: it.type === "coordinates" ? "coordinates" : "place" });
   }
-  const ICONS = { field: "▦", place: "📍", coordinates: "⌖" };
+  const ICONS = { field: "▦", place: "📍", coordinates: "⌖", intersection: "✚" };
   function renderSuggestions(res, q) {
     const list = $("search-results");
     list.replaceChildren();
     res.items.forEach((it, n) => {
       list.append(el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: `sugg-${n}`, class: `sugg sugg-${it.type}`,
         onclick: () => pickSuggestion(it) },
-        el("span", { class: "sugg-icon", "aria-hidden": "true", text: ICONS[it.type] || "📍" }),
+        el("span", { class: "sugg-icon", "aria-hidden": "true", text: ICONS[it.kind === "intersection" ? "intersection" : it.type] || "📍" }),
         el("span", { class: "sugg-text" }, el("span", { class: "sugg-main" }, ...highlight(it.main, q)),
           it.secondary ? el("span", { class: "sugg-sub", text: it.secondary }) : null))));
     });

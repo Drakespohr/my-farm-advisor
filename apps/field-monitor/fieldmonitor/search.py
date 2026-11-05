@@ -204,10 +204,16 @@ class Geocoder:
         return [], "Address search is unavailable right now: " + ", ".join(errors) + ". Coordinates still work."
 
 
-def search(q: str, fields: list[dict[str, Any]], geocoder: Geocoder) -> dict[str, Any]:
+def search(q: str, fields: list[dict[str, Any]], geocoder: Geocoder, intersections: Any = None,
+           near: Optional[tuple[float, float]] = None) -> dict[str, Any]:
     coords = parse_coords(q)
     error = None
-    if coords:
+    crosses: list[dict[str, Any]] = []
+    if not coords:
+        crosses, error = find_intersections(q, fields, intersections, near, partial=False)
+    if crosses:
+        places = crosses
+    elif coords:
         lat, lon = coords
         places = [{"name": f"{lat:.6f}, {lon:.6f}", "lat": lat, "lon": lon, "bbox": None, "kind": "coordinates", "source": None}]
         if 0 < lon and -125 <= -lon <= -66 and 24 <= lat <= 50 and not re.search(r"[EW]", q, re.I):
@@ -346,9 +352,42 @@ def _field_item(f: dict[str, Any]) -> dict[str, Any]:
             "bbox": f["bbox"], "match": f["match"]}
 
 
+def _fields_center(fields: list[dict[str, Any]]) -> Optional[tuple[float, float]]:
+    """Fallback search point: the middle of the user's fields."""
+    pts = []
+    for f in fields:
+        try:
+            c = shape(f["geometry"]).centroid
+            pts.append((c.y, c.x))
+        except Exception:
+            continue
+    if not pts:
+        return None
+    return sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+
+
+def find_intersections(q: str, fields: list[dict[str, Any]], finder: Any, near: Optional[tuple[float, float]],
+                       partial: bool) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Road crossings for "A and B" near the map view (or the user's fields). (items, error)."""
+    from . import intersections as ix
+    if finder is None or not ix.parse(q):
+        return [], None
+    point = near or _fields_center(fields)
+    if point is None:
+        return [], None
+    try:
+        items = finder.find(q, point, partial=partial)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        log.warning("intersection lookup failed: %s", exc.__class__.__name__)
+        return [], "Intersection lookup is unavailable right now."
+    for it in items:
+        it["fields_near"] = [m["id"] for m in match_fields("", fields, [(it["lat"], it["lon"])])]
+    return items, None
+
+
 def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
             near: Optional[tuple[float, float]] = None, google: Optional[GooglePlaces] = None,
-            session_token: Optional[str] = None) -> dict[str, Any]:
+            session_token: Optional[str] = None, intersections: Any = None) -> dict[str, Any]:
     """The 5 most likely things you're looking for, in one list, while you type.
 
     Order: typed coordinates (and the field they land in), your fields whose name starts with /
@@ -364,6 +403,11 @@ def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
         out["items"] = [{"type": "coordinates", "main": f"{coords[0]:.6f}, {coords[1]:.6f}", "secondary": "Coordinates",
                          "name": f"{coords[0]:.6f}, {coords[1]:.6f}", "lat": coords[0], "lon": coords[1], "bbox": None}]
         out["items"] += [_field_item(f) for f in match_fields("", fields, [coords])[:MAX_SUGGESTIONS - 1]]
+        return out
+    crosses, cross_err = find_intersections(q, fields, intersections, near, partial=True)
+    if crosses:  # "250th and Waverly": the crossing itself, then your fields next to it
+        out["items"] = crosses[:2] + [_field_item(f) for f in match_fields("", fields, [(crosses[0]["lat"], crosses[0]["lon"])])][:3]
+        out["source"] = "OpenStreetMap"
         return out
     ql = q.lower()
     named = [f for f in match_fields(q, fields, []) if f["match"] == "name"]
