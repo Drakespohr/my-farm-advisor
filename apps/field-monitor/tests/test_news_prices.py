@@ -72,7 +72,10 @@ def test_news_items_local_vs_national(app, store):
     assert [i["title"] for i in local if i["type"] == "storm"] == ["Hail (1.25 in) reported near Ames, Story County, IA"]
     national = c.get("/api/feed?section=national").json()
     assert [i["type"] for i in national] == ["news"] and national[0]["url"] == "https://example.org/corn-yield"
-    everything = c.get("/api/feed").json()
-    assert {i["title"] for i in everything if i["type"] == "storm"} == {
-        "Hail (1.25 in) reported near Ames, Story County, IA", "Hail (1.25 in) reported near Far Away, Kern County, CA"}
+    everything = c.get("/api/feed").json()  # weather is local-only on every tab: the California storm never shows
+    assert [i["title"] for i in everything if i["type"] == "storm"] == ["Hail (1.25 in) reported near Ames, Story County, IA"]
+    assert all(i["miles"] <= 100 for i in everything if i["type"] == "storm")
+    nobody = TestClient(app, headers={"X-Requested-With": "fieldmonitor"})
+    signup(nobody, "b@x.co", "Bo")  # no fields: no storms at all
+    assert [i for i in nobody.get("/api/feed").json() if i["type"] == "storm"] == []
     assert c.get("/api/news/sources").status_code == 200  # first account is admin

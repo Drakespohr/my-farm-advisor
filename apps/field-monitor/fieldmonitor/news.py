@@ -4,8 +4,8 @@ Sources (all fetched by the server, cached, and never fatal when they fail):
 - RSS/Atom feeds (national/extension news). Only titles, short summaries, and links are shown;
   every item links back to the publisher.
 - NOAA Storm Prediction Center local storm reports (hail, wind), public domain. Turned into
-  local items like "Hail (1.75 in) reported near Chariton, Lucas County, IA" for members whose
-  fields are within ~100 miles.
+  local items like "Hail (1.75 in) reported near Chariton, Lucas County, IA", shown only to people
+  with a field within 100 miles (on every News tab).
 
 The default source list lives in DEFAULT_SOURCES and can be replaced with
 $FIELD_MONITOR_DATA/news_sources.json. Sources marked "verified": false were written without

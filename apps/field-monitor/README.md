@@ -215,7 +215,7 @@ personal views.
 
 - **Local:** a weekly roundup ("This week near your fields: Southern rust: 3 reports (Lucas,
   Wayne)"), community reports labeled by county ("Southern rust spotted in Lucas County, IA"),
-  and NOAA storm reports within ~100 mi of your fields ("Hail (1.75 in) reported near 3 S
+  and NOAA storm reports within 100 miles of your fields (on every News tab; none from farther away) ("Hail (1.75 in) reported near 3 S
   Chariton, Lucas County, IA"). County names come from US Census boundaries.
 - **National:** headlines from RSS/Atom sources (title, short summary, link to the publisher).
 - **Sources** are server-side, refreshed every 2 h, and never fatal when they fail. Defaults are in
@@ -321,6 +321,10 @@ The search bar at the top of the map is always there. Type any of:
 - coordinates: `40.9245, -98.348`, `40.9245 N, 98.348 W`, `40°55'28"N 98°20'53"W`, or GIS order
   `-98.348, 40.9245`. If you drop the minus sign on a US longitude, it also offers the west point;
 - a street address (`1234 Road 12, Aurora NE`): US Census Bureau geocoder;
+- a crossroads (`250th and Waverly Road`, `250th & Waverly Rd`, `Hwy 6 / 148th`): the two roads are
+  looked up in OpenStreetMap ([Overpass API](https://overpass-api.de), free with fair use) within
+  about 35 miles of the map view (or your fields) and the crossing nearest you is listed first, with
+  its distance. Partial names work while typing ("250th and wav");
 - a town, road, or landmark: OpenStreetMap Nominatim (US only; set
   `FIELD_MONITOR_GEOCODE_COUNTRIES` to change, empty for worldwide).
 

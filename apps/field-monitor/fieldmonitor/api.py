@@ -28,6 +28,7 @@ from . import APP_NAME, APP_TAGLINE, APP_TAGLINE_NO_MARKET, PROCESSING_VERSION, 
 from . import search as mapsearch
 from . import planting, survey, yields
 from .planting import SoilWeather
+from .intersections import Intersections
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
 from .news import News
@@ -154,6 +155,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     geocoder = mapsearch.Geocoder(f"my-farm-advisor-field-monitor/{__version__}",
                                   countries=os.getenv("FIELD_MONITOR_GEOCODE_COUNTRIES", "us"))
     app.state.geocoder = geocoder
+    app.state.intersections = Intersections(f"my-farm-advisor-field-monitor/{__version__}")
     # Google Places suggestions are used only when the owner sets their own key in the environment.
     _gkey = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
     app.state.google_places = mapsearch.GooglePlaces(
@@ -385,11 +387,15 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return [{k: p[k] for k in ("name", "lat", "lon", "bbox")} for p in places]
 
     @app.get("/api/search")
-    def search(q: str = Query(..., min_length=2, max_length=200), user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
-        """Find your fields by name, address, or coordinates, plus matching places to jump to on the map."""
+    def search(q: str = Query(..., min_length=2, max_length=200), lat: float | None = Query(None, ge=-90, le=90),
+               lon: float | None = Query(None, ge=-180, le=180),
+               user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Find your fields by name, address, coordinates, or intersection ("250th and Waverly Rd"),
+        plus matching places to jump to on the map. lat/lon (the map view) picks the area for intersections."""
         mine = accounts.fields_for(user["id"])
         fields = [f for f in store.list_fields(True) if f["id"] in mine]
-        return mapsearch.search(q, fields, geocoder)
+        near = (lat, lon) if lat is not None and lon is not None else None
+        return mapsearch.search(q, fields, geocoder, app.state.intersections, near)
 
     @app.get("/api/search/suggest")
     def search_suggest(q: str = Query(..., min_length=1, max_length=200), lat: float | None = Query(None, ge=-90, le=90),
@@ -400,7 +406,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         mine = accounts.fields_for(user["id"])
         fields = [f for f in store.list_fields(True) if f["id"] in mine]
         near = (lat, lon) if lat is not None and lon is not None else None
-        return mapsearch.suggest(q, fields, geocoder, near, app.state.google_places, session)
+        return mapsearch.suggest(q, fields, geocoder, near, app.state.google_places, session, app.state.intersections)
 
     @app.get("/api/search/place")
     def search_place(id: str = Query(..., min_length=10, max_length=300), session: str | None = Query(None, pattern=r"^[A-Za-z0-9-]{8,64}$"),
