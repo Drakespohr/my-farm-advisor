@@ -452,6 +452,8 @@
               ? el("b", { text: `${Math.round(f.yield.bu_ac)} bu/ac` }) : el("span", { text: f.yield.label }),
             f.yield.bu_ac != null && f.yield.method !== "harvest" ? el("span", { class: "muted", text: ` (${f.yield.low}–${f.yield.high}, ${f.yield.confidence})` }) : null)
         : null,
+      f.timing && f.timing.headline && f.timing.headline !== f.headline && f.timing.status !== "no_crop"
+        ? el("div", { class: "small fc-timing" }, el("span", { class: "muted", text: "Next: " }), f.timing.headline) : null,
       el("p", { class: "fc-head", text: f.headline }),
       el("div", { class: `small ${img && !img.fresh ? "stale" : "muted"}`,
         text: img ? (img.fresh ? `Latest image ${img.label} · ${img.age_days === 0 ? "today" : img.age_days === 1 ? "yesterday" : `${img.age_days} days ago`}`

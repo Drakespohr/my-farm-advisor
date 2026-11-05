@@ -1237,10 +1237,45 @@
 
   async function loadFieldLog(f) {
     const box = $("field-log-body");
+    state.fieldLog = null;
     if (!f.farm_id) { box.replaceChildren(el("p", { class: "muted small", text: "This field isn't on a farm yet." })); return; }
     try {
-      await FM.renderLog(box, { farmId: f.farm_id, fieldId: f.id, fields: [{ id: f.id, name: f.name }], role: f.my_role });
+      state.fieldLog = await FM.renderLog(box, { farmId: f.farm_id, fieldId: f.id, fields: [{ id: f.id, name: f.name }], role: f.my_role });
     } catch (err) { box.replaceChildren(el("p", { class: "muted small", text: `Log unavailable: ${err.message}` })); }
+    loadTiming(f);
+  }
+
+  // Planting window and stand count: what to do next on this field, with a one-tap log button.
+  const TIMING_ACTION = {
+    window_open: ["planting", "Log planting"], late: ["planting", "Log planting"], waiting: ["planting", "Log planting"],
+    cold_snap: ["planting", "Log planting"], stand_count_due: ["stand_count", "Log stand count"],
+    stand_count_overdue: ["stand_count", "Log stand count"], emerging: ["growth_stage", "Log emergence"],
+    planted: ["growth_stage", "Log emergence"],
+  };
+  async function loadTiming(f) {
+    const p = $("timing-panel");
+    p.hidden = true;
+    let t;
+    try { t = await api(`/api/fields/${encodeURIComponent(f.id)}/timing`); } catch (_) { return; }
+    if (!state.field || state.field.id !== f.id || t.status === "no_crop") return;
+    const tone = t.priority >= 3 ? "high" : t.priority >= 2 ? "moderate" : "low";
+    const soil = t.soil && t.soil.today_f != null
+      ? el("span", { class: "chip", text: `Soil ${Math.round(t.soil.today_f)}°F at 2 in${t.soil.threshold_f ? ` · opens at ${t.soil.threshold_f}°F` : ""}` }) : null;
+    const gddChip = t.gdd_since_planting != null ? el("span", { class: "chip", text: `${t.gdd_since_planting} GDD since planting` }) : null;
+    p.replaceChildren(el("div", { class: "row space wrap gap" }, el("h3", { text: "Planting & stand count" }),
+      el("div", { class: "chips" }, soil, gddChip)),
+      el("p", { class: `timing-head tone-${tone}`, text: t.headline }));
+    const act = TIMING_ACTION[t.status];
+    if (act && state.fieldLog && state.fieldLog.canWrite) {
+      p.append(el("button", { type: "button", class: `btn ${t.priority >= 2 ? "primary" : "ghost"} small-btn`, text: act[1],
+        onclick: () => { state.fieldLog.openForm(act[0]); $("field-log").scrollIntoView({ behavior: "smooth", block: "start" }); } }));
+    }
+    if (t.todo && t.todo.length) {
+      p.append(el("details", { class: "small" }, el("summary", { text: "Not yet confirmed" }),
+        el("ul", { class: "bullets" }, t.todo.map((x) => el("li", { text: x }))),
+        el("p", { class: "muted" }, "Rules: ", ...(t.sources || []).flatMap((s, i) => [i ? " · " : "", el("a", { href: s.url, target: "_blank", rel: "noopener", text: s.label })]))));
+    }
+    p.hidden = false;
   }
 
   async function loadYield(f) {

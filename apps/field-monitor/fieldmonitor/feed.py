@@ -203,6 +203,7 @@ def make_router(
     news: News,
     prices: Prices,
     yield_for: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
+    timing_for: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> APIRouter:
     with accounts.db() as c:
         c.executescript(SCHEMA)
@@ -554,6 +555,16 @@ def make_router(
             headline += " Tip: set the crop (Manage → Edit name & crop) for disease risk."
         out["season_over"] = season_over
         out["yield"] = brief_yield(f, user) if user else None
+        # Planting window / stand count: leads the card when it's the most urgent thing today.
+        t = None
+        if timing_for is not None:
+            try:
+                t = timing_for(f)
+            except Exception:  # timing must never break the daily brief
+                log.exception("timing failed for %s", f["id"])
+        out["timing"] = {k: t.get(k) for k in ("status", "headline", "priority", "tasks")} if t else None
+        if t and t["priority"] > priority:
+            headline, priority = t["headline"], t["priority"]
         out["headline"], out["priority"] = headline, priority
         return out
 

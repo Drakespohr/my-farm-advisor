@@ -35,3 +35,14 @@ def ndvi_field(shape: tuple[int, int] = (60, 60), base: float = 0.8, seed: int =
     # Gentle west-east gradient so zones have structure.
     arr += np.linspace(-0.05, 0.05, shape[1])[None, :]
     return arr.astype(np.float32)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_soil_weather(monkeypatch):
+    """Tests never call Open-Meteo; tests that need soil data install a fake feed."""
+    import httpx
+
+    def offline(self, lat, lon):
+        raise httpx.ConnectError("offline in tests")
+
+    monkeypatch.setattr("fieldmonitor.planting.SoilWeather.daily", offline)
