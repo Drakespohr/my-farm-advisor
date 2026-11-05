@@ -56,6 +56,22 @@ people (an agronomist, a landlord): it opens only that field, never the rest of 
 Existing data moves over automatically on startup: each owner's fields go onto their farm, and
 existing one-field shares stay one-field shares (nobody gains access to other fields).
 
+## Farm and field log
+
+Everything done on the farm goes in **one shared log**: farm, optional field, when, activity, and
+details. The farm page shows the whole farm's log; each field page shows that field's log.
+
+Activities: planting, stand count, growth stage, irrigation, rainfall, soil moisture,
+fertilizer/manure, spray (foliar), scouting, soil test, harvest, irrigation-water test, manure test,
+and notes. Notes, rainfall, water tests, and manure tests can be farm-wide; the rest belong to a
+field. Every entry is checked by the same rules as `apps/ag-inputs` (copied into `records.py`),
+including restricted-use sprays needing an EPA number and the record-keeping deadline badge.
+
+- **Who can add:** owner, operator, applicator, scout. Viewers and one-field shares can read only.
+- **Never edited or deleted** (the database refuses): **Correct** adds a new version that replaces
+  the old one in the log; **Void** withdraws a mistake. History stays (`?history=true`).
+- Each entry records who logged it and how (`manual`, later `chat`, `photo`, `import`).
+
 ## Accounts, sharing, and the marketplace
 
 > The marketplace is **paused** by default: the tab, listing endpoints, and listing feed items are
@@ -425,6 +441,9 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | GET/POST | `/api/farms/{id}/members` | Team list / owner: add someone or change their role `{email, role}` |
 | DELETE | `/api/farms/{id}/members/{user_id}` | Owner: remove someone; anyone: leave |
 | POST | `/api/farms/{id}/fields` | Owner: move fields you own onto this farm |
+| GET | `/api/log/kinds` | Activity kinds and their field schemas (drives the log forms) |
+| GET/POST | `/api/farms/{id}/log` | Farm log (filters: `field_id`, `kind`, `year`, `history`) / add, correct (`supersedes_id`), or void an entry |
+| GET | `/api/fields/{id}/log` | One field's log (also for one-field shares) |
 | GET | `/api/fields/{id}/yield?year=` | Yield estimate with method, range, canopy signal, calibration |
 | POST | `/api/fields/{id}/yield/records` | Owner: add `expected`, `harvest`, or `count` (with inputs) |
 | POST | `/api/yield/count` | Calculate a field count without saving |

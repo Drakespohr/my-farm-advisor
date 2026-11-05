@@ -34,6 +34,7 @@ from .usda_ams import STATE_FULL
 from .prices import Prices
 from .social import make_router
 from .farms import make_router as make_farms_router
+from .farmlog import FarmLog, make_router as make_log_router
 from .weather import WeatherStore
 from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
@@ -168,7 +169,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             raise HTTPException(404, f"Unknown field {field_id!r}")
         if need == "owner" and role != "owner":
             raise HTTPException(403, "Only the field's owner can do that.")
-        return {**f, "my_role": role}
+        return {**f, "my_role": role, "farm_id": accounts.farm_of(field_id)}
 
     # ---- yield -----------------------------------------------------------------
     def farm_calibration(user: dict[str, Any], kind: str) -> dict[str, Any] | None:
@@ -678,6 +679,9 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
 
     app.include_router(make_router(accounts, store, require_user, lambda fid: field_score_for(fid)))
     app.include_router(make_farms_router(accounts, store, require_user))
+    farm_log = FarmLog(accounts)
+    app.state.farm_log = farm_log
+    app.include_router(make_log_router(accounts, farm_log, require_user))
     app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices,
                                      yield_for=lambda f, user: yield_for(f, user)))
 
