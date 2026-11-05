@@ -28,6 +28,12 @@ provider's site before budgeting.**
 - [ ] Pesticide record windows (14 days private RUP, 48 h commercial/noncommercial) with the Nebraska
       Department of Agriculture.
 
+## Product
+
+- [ ] **Rework the opening survey questions** with real farmers: wording, which questions to keep,
+      and the answer choices. They're plain data in `fieldmonitor/survey.py` (`QUESTIONS`); answers
+      already saved stay readable as long as question ids are kept.
+
 ## Security and hosting
 
 - [ ] Serve over HTTPS and set `FIELD_MONITOR_COOKIE_SECURE=1`.
