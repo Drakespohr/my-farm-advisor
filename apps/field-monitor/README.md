@@ -327,7 +327,9 @@ The search bar at the top of the map is always there. Type any of:
   its distance. Partial names work while typing ("250th and wav"). If Overpass can't be reached
   (some networks block it), or finds nothing, Photon's typo-tolerant road search is used instead
   ("waverley" finds Waverly Road): grid roads that run north–south and east–west give an
-  **approximate** crossing, labelled as such. With no crossing at all, the closest-matching roads
+  **approximate** crossing, labelled as such. When the server can't reach Overpass but your browser
+  can (some networks block one and not the other), the browser looks up the exact crossing itself
+  (`static/crossroads.js`, same matching rules) before falling back to approximate. With no crossing at all, the closest-matching roads
   and towns are offered, so the dropdown always has options;
 - a town, road, or landmark: OpenStreetMap Nominatim (US only; set
   `FIELD_MONITOR_GEOCODE_COUNTRIES` to change, empty for worldwide).

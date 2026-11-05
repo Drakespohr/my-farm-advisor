@@ -362,9 +362,10 @@
   // Several crossroads match (rural road names repeat): pin them all, numbered, nearest first.
   function pinAll(places) {
     searchPin.clearLayers();
-    const markers = places.map((p, i) => dropPin(p, String(i + 1)));
+    const markers = places.map((p, i) => dropPin(p, places.length > 1 ? String(i + 1) : ""));
     map.setView([places[0].lat, places[0].lon], 16);
-    markers[0].openPopup();
+    if (places.length === 1) markers[0].openPopup();  // several: the list picks one (it would cover the popup)
+    return markers;
   }
   function goToField(f) {
     closeSearch();
@@ -402,9 +403,28 @@
         list.append(el("li", {}, el("button", { type: "button", onclick: () => goToPlace(p) },
           p.name, el("span", { class: "muted", text: near + (p.source ? ` · ${p.source}` : "") }))));
       }
+      let crosses = res.places.filter((p) => p.kind === "intersection");
+      // The server couldn't get exact road shapes (often its network blocks Overpass): ask from the browser.
+      if (window.OveracreCrossroads && window.OveracreCrossroads.parse(q) && !crosses.some((p) => !p.approximate)) {
+        list.prepend(searchNote("Looking up the crossroads in OpenStreetMap…"));
+        try {
+          const exact = await window.OveracreCrossroads.find(q, [c.lat, c.lng]);
+          if (exact.length) { crosses = exact; res.error = null; }
+        } catch (err) {
+          list.append(searchNote(`OpenStreetMap road lookup failed from this browser too (${err.message}).`));
+        }
+        list.firstChild && list.firstChild.remove();
+      }
       if (res.error) list.append(searchNote(res.error));
-      const crosses = res.places.filter((p) => p.kind === "intersection");
-      if (crosses.length) { pinAll(crosses); list.hidden = crosses.length === 1; return; }  // pins on the map
+      if (crosses.length) {  // pins on the map; the list shows just those crossroads, numbered like the pins
+        const markers = pinAll(crosses);
+        list.replaceChildren(el("li", { class: "search-head", text: crosses.length > 1 ? "Crossroads (nearest first)" : "Crossroads" }),
+          ...crosses.map((p, i) => el("li", {}, el("button", { type: "button", onclick: () => {
+            map.setView([p.lat, p.lon], 16); markers[i].openPopup(); closeSearch();
+          } }, el("strong", { text: `${i + 1}. ${p.name}` }), el("span", { class: "muted", text: ` · ${p.secondary || ""}` })))));
+        list.hidden = crosses.length === 1;
+        return;
+      }
       if (!res.fields.length && !res.places.length) {
         if (!res.error) list.append(searchNote("No matches. Try a field name, an address (1234 Road 12, Aurora NE), crossroads (250th and Waverly Rd), a town, or 'lat, lon'."));
         explainUnreachable(list);
