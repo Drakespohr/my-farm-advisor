@@ -1432,7 +1432,7 @@
   });
 
   // ---------- routing & boot -----------------------------------------------------
-  const VIEWS = ["auth", "today", "feed", "fields", "market", "messages", "profile", "farm"];
+  const VIEWS = ["auth", "today", "feed", "fields", "market", "messages", "profile", "farm", "survey"];
   function showView(name) {
     for (const v of VIEWS) $(`view-${v}`).hidden = v !== name;
     $("topbar").hidden = name === "auth";
@@ -1465,6 +1465,7 @@
     if (view === "news" || view === "feed") { showView("feed"); FM.views.news(arg); return; }
     if (view === "today" || view === "") { showView("today"); FM.views.today(); return; }
     if (view === "messages") { showView("messages"); FM.views.messages(arg); return; }
+    if (view === "survey") { showView("survey"); FM.views.survey(arg); return; }
     if (view === "farm") { showView("farm"); FM.views.farm(arg); document.querySelector(".usermenu").open = false; return; }
     if (view === "u" || view === "me") { showView("profile"); FM.views.profile(view === "me" ? state.me.user.id : arg, view === "me"); return; }
     showView("fields");

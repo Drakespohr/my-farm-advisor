@@ -604,3 +604,12 @@ label > input[type=text], label > input[type=email], label > input[type=password
 .timing-head.tone-moderate { color: var(--fair); }
 .timing-head.tone-high { color: var(--poor); }
 .timing-panel .btn { align-self: flex-start; }
+
+/* Opening farm survey */
+.survey { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+.survey-q { border: 1px solid var(--border); margin: 0; }
+.survey-q legend { font-weight: 650; padding: 0 4px; }
+.survey-opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.survey-opt { font: inherit; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
+.survey-opt.on { background: var(--good); border-color: var(--good); color: #fff; font-weight: 650; }
+.survey-banner { display: block; text-decoration: none; color: var(--text-primary); border-left: 4px solid var(--good); margin-bottom: 12px; }
