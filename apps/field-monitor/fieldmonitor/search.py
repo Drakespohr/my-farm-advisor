@@ -377,9 +377,9 @@ def find_intersections(q: str, fields: list[dict[str, Any]], finder: Any, near: 
         return [], None
     try:
         items = finder.find(q, point, partial=partial)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+    except Exception as exc:  # never let a road lookup break search
         log.warning("intersection lookup failed: %s", exc.__class__.__name__)
-        return [], "Intersection lookup is unavailable right now."
+        return [], "Couldn't reach OpenStreetMap to find that crossroads right now. Try again in a minute."
     for it in items:
         it["fields_near"] = [m["id"] for m in match_fields("", fields, [(it["lat"], it["lon"])])]
     return items, None
@@ -422,12 +422,12 @@ def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
                 places, out["source"] = google.autocomplete(q, session_token, near), "Google"
             except QuotaExceeded:
                 log.warning("Google Places daily limit reached; using OpenStreetMap suggestions")
-            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            except Exception as exc:
                 log.warning("Google Places autocomplete failed: %s", exc.__class__.__name__)
         if not out["source"]:
             try:
                 places, out["source"] = [_photon_item(p) for p in geocoder.photon(q, near)], "OpenStreetMap"
-            except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+            except Exception as exc:  # suggestions must never fail the whole request
                 out["error"] = f"Address suggestions unavailable ({exc.__class__.__name__}); press Search to look it up."
     n_fields = min(len(named), MAX_FIELD_SUGGESTIONS if places else MAX_SUGGESTIONS)
     out["items"] = [_field_item(f) for f in named[:n_fields]] + places[:MAX_SUGGESTIONS - n_fields]
@@ -437,3 +437,33 @@ def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
 def _only_names(q: str, named: list[dict[str, Any]]) -> bool:
     """Skip geocoding when the query is exactly one of your field names."""
     return any(m["name"].strip().lower() == q.strip().lower() for m in named)
+
+
+_HEALTH: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def service_health(geocoder: Geocoder, finder: Any, google: Optional[GooglePlaces]) -> dict[str, Any]:
+    """Quick reachability check of each lookup service (cached 5 minutes)."""
+    if _HEALTH["value"] and time.monotonic() - _HEALTH["at"] < 300:
+        return _HEALTH["value"]
+    from . import intersections as ix
+
+    def probe(fn: Callable[[], Any]) -> dict[str, Any]:
+        try:
+            fn()
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": exc.__class__.__name__}
+
+    ua = {"User-Agent": geocoder.user_agent}
+    out = {
+        "crossroads (OpenStreetMap Overpass)": probe(lambda: httpx.post(ix.OVERPASS_URLS[0], data={"data": "[out:json];node(1);out ids;"},
+                                                                         headers=ua, timeout=8.0).raise_for_status()),
+        "place suggestions (Photon)": probe(lambda: httpx.get(PHOTON_URL, params={"q": "Lincoln", "limit": 1}, headers=ua,
+                                                              timeout=8.0).raise_for_status()),
+        "street addresses (US Census)": probe(lambda: httpx.get(
+            "https://geocoding.geo.census.gov/geocoder/benchmarks", headers=ua, timeout=8.0).raise_for_status()),
+        "Google Places": {"ok": None, "error": "no key set"} if google is None else {"ok": True},
+    }
+    _HEALTH.update(at=time.monotonic(), value=out)
+    return out

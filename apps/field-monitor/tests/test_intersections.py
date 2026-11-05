@@ -88,7 +88,7 @@ def test_overpass_query_cache_and_spacing():
     first = ix.find("250th and Waverly Rd", (40.9, -96.5))
     assert first[0]["lat"] == 40.92 and len(fake.calls) == 1
     q = fake.calls[0]
-    assert 'way["highway"]["name"~"(^| )250(st|nd|rd|th)?( |$)",i]' in q and "40.4000,-97.1" in q
+    assert 'way["highway"]["name"~"(^| )250(st|nd|rd|th)?( |$)",i]' in q and "40.6500,-96.83" in q  # nearby box first
     ix.find("250TH AND WAVERLY ROAD", (40.9, -96.5))
     assert len(fake.calls) == 1  # cached
     assert ix.find("148th and waverly", (40.9, -96.55), partial=True) == []  # too soon after the last call: skipped while typing
@@ -118,3 +118,58 @@ def test_api_passes_map_center(client):  # noqa: F811
     c.app.state.intersections._last = -10  # as if the user typed a moment later (requests are spaced 0.6 s)
     s = c.get("/api/search/suggest", params={"q": "250th and Waverly", "lat": 40.9, "lon": -96.5}).json()
     assert s["items"][0]["kind"] == "intersection"
+
+
+def test_widens_the_search_only_when_nothing_crosses_nearby():
+    empty = {"elements": []}
+
+    class TwoStage(FakeOverpass):
+        def __call__(self, url, data=None, headers=None, timeout=None):
+            self.calls.append(data["data"])
+            body = empty if len(self.calls) == 1 else GRID
+            return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    fake = TwoStage()
+    out = finder(fake).find("250th and Waverly", (40.9, -96.5))
+    assert out and len(fake.calls) == 2 and "40.3000" in fake.calls[1]  # second, wider box
+
+
+def test_falls_back_to_the_next_overpass_server(monkeypatch):
+    import fieldmonitor.intersections as ix
+    monkeypatch.setattr(ix, "OVERPASS_URLS", ["https://busy.example/api", "https://backup.example/api"])
+    seen = []
+
+    def post(url, data=None, headers=None, timeout=None):
+        seen.append(url)
+        if "busy" in url:
+            return httpx.Response(504, text="<html>timeout</html>", request=httpx.Request("POST", url))
+        return httpx.Response(200, json=GRID, request=httpx.Request("POST", url))
+
+    out = finder(post).find("250th and Waverly", (40.9, -96.5))
+    assert out[0]["lat"] == 40.92 and seen == ["https://busy.example/api", "https://backup.example/api"]
+
+
+def test_search_never_errors_and_reports_why(client):  # noqa: F811
+    c, _ = client
+
+    class Broken:
+        def find(self, *a, **k):
+            raise RuntimeError("weird geometry")
+
+    c.app.state.intersections = Broken()
+    r = c.get("/api/search/suggest", params={"q": "250th and Waverly", "lat": 40.9, "lon": -96.5})
+    assert r.status_code == 200
+    full = c.get("/api/search", params={"q": "250th and Waverly", "lat": 40.9, "lon": -96.5})
+    assert full.status_code == 200
+
+
+def test_page_files_are_revalidated_and_health_endpoint(client, monkeypatch):  # noqa: F811
+    c, _ = client
+    assert c.get("/app.js").headers["cache-control"] == "no-cache"
+    import fieldmonitor.search as fs
+    monkeypatch.setitem(fs._HEALTH, "value", None)
+    monkeypatch.setattr(fs.httpx, "post", lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("blocked")))
+    monkeypatch.setattr(fs.httpx, "get", lambda url, **k: httpx.Response(200, request=httpx.Request("GET", url)))
+    h = c.get("/api/search/health").json()
+    assert h["crossroads (OpenStreetMap Overpass)"] == {"ok": False, "error": "ConnectError"}
+    assert h["place suggestions (Photon)"] == {"ok": True}
