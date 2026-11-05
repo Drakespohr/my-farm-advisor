@@ -595,3 +595,12 @@ label > input[type=text], label > input[type=email], label > input[type=password
 .log-form label.check { flex-direction: row; align-items: center; display: flex; gap: 6px; }
 .log-form textarea { width: 100%; box-sizing: border-box; font: inherit; }
 @media (max-width: 640px) { .log-form .grid2 { grid-template-columns: 1fr; } }
+
+/* Planting window and stand count */
+.timing-panel { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 10px 0; background: var(--surface-0); display: flex; flex-direction: column; gap: 8px; }
+.timing-panel h3 { margin: 0; font-size: 15px; }
+.timing-panel .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.timing-head { margin: 0; font-weight: 650; }
+.timing-head.tone-moderate { color: var(--fair); }
+.timing-head.tone-high { color: var(--poor); }
+.timing-panel .btn { align-self: flex-start; }

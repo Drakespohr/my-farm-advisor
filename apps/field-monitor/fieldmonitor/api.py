@@ -26,7 +26,8 @@ from pydantic import BaseModel, Field
 
 from . import APP_NAME, APP_TAGLINE, APP_TAGLINE_NO_MARKET, PROCESSING_VERSION, marketplace_enabled, __version__, analysis, diagnose, qa, score as scoring
 from . import search as mapsearch
-from . import yields
+from . import planting, yields
+from .planting import SoilWeather
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
 from .news import News
@@ -199,6 +200,25 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         return yields.estimate(f, obs, recs, year, cal, today)
 
     app.state.yield_for = yield_for
+
+    # ---- planting window and stand count reminders --------------------------------------
+    app.state.soil_weather = SoilWeather()
+
+    def timing_for(f: dict[str, Any], today: date | None = None) -> dict[str, Any]:
+        c = shape(f["geometry"]).centroid
+        county = news.counties.lookup(c.y, c.x)
+        farm = accounts.farm_of(f["id"])
+        today = today or date.today()
+        entries = app.state.farm_log.list(farm_id=farm, field_ids=[f["id"]], year=today.year,
+                                          include_farm_level=False) if farm else []
+        try:
+            days = app.state.soil_weather.daily(c.y, c.x)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            log.warning("soil temperature unavailable for %s: %s", f["id"], exc.__class__.__name__)
+            days = None
+        return planting.timing(f.get("crop"), county["state"] if county else None, entries, days, today)
+
+    app.state.timing_for = timing_for
 
     def ok_obs(field_id: str) -> list[dict[str, Any]]:
         """Clear observations that passed QA (no haze or one-pass artifacts)."""
@@ -394,6 +414,13 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
             raise HTTPException(400, str(exc)) from None
         except (httpx.HTTPError, KeyError, TypeError) as exc:
             raise HTTPException(502, f"Couldn't look up that place ({exc.__class__.__name__}).") from None
+
+    @app.get("/api/fields/{field_id}/timing")
+    def field_timing(field_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Planting window and stand count status for this field, with what to do next."""
+        out = timing_for(field_or_404(field_id, user))
+        out["sources"] = planting.SOURCES
+        return out
 
     @app.get("/api/yield/methods")
     def yield_methods(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
@@ -683,7 +710,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     app.state.farm_log = farm_log
     app.include_router(make_log_router(accounts, farm_log, require_user))
     app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices,
-                                     yield_for=lambda f, user: yield_for(f, user)))
+                                     yield_for=lambda f, user: yield_for(f, user),
+                                     timing_for=lambda f: timing_for(f)))
 
     @app.exception_handler(FileExistsError)
     def conflict(_: Any, exc: FileExistsError) -> JSONResponse:

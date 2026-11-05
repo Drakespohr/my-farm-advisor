@@ -176,5 +176,6 @@
     }
     box.replaceChildren(head, formBox, list);
     await refresh();
+    return { openForm: (kind) => (canWrite ? openForm(kind) : null), refresh, canWrite };
   };
 })();

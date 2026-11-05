@@ -57,6 +57,29 @@ Existing data moves over automatically on startup (and any "scout" from earlier 
 "agronomist"): each owner's fields go onto their farm, and
 existing one-field shares stay one-field shares (nobody gains access to other fields).
 
+## Planting window and stand count reminders
+
+Each field's page shows **Planting & stand count**, and the Today page puts it first when it's the
+most urgent thing. It uses the field's centroid (weather), crop, state, and log:
+
+| When | Rule | Source |
+|---|---|---|
+| Planting window opens (corn, soybeans) | 2-inch soil at or above 50°F for the last 3 days and the next 2 forecast days | [UNL CropWatch](https://cropwatch.unl.edu/2019/corn-and-soybean-planting-considerations/), [Iowa State](https://crops.extension.iastate.edu/post/soil-temperature-and-planting-conditions-what-watch-spring) |
+| Hold off | Soil is warm but the forecast drops below 50°F | same |
+| Corn emergence (estimate) | 115 GDD (base 50°F, cap 86°F) after the logged planting | [Purdue](https://ag.purdue.edu/news/department/agry/kernel-news/2023/05/2023-corn-emergence.html) |
+| Stand count due | 14–21 days after emergence (logged VE/VC wins over the estimate); overdue after 21 days, repeats until a count is logged, stops 30 days later or at harvest | product spec |
+| Soybean stand count | 21 days after planting unless emergence is logged | assumption (TODO) |
+| Winter wheat | calendar dates only | TODO |
+
+**Not yet confirmed (TODO):** state planting dates (`STATE_CALENDAR` in `planting.py`, all empty),
+soybean emergence timing, 50°F vs 60°F for soybeans, and winter wheat dates. The field page lists
+these under "Not yet confirmed".
+
+Soil temperature is Open-Meteo's modeled 6 cm (2.4 in) soil temperature (past 3 months plus a 7-day
+forecast, cached 3 hours per location). **Its free API is non-commercial only:** before serving
+customers, buy a commercial plan and set `OPEN_METEO_API_KEY` (the app then uses the commercial
+endpoint). If the weather feed is down, the page says so and nothing else breaks.
+
 ## Farm and field log
 
 Everything done on the farm goes in **one shared log**: farm, optional field, when, activity, and
@@ -442,6 +465,7 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | GET/POST | `/api/farms/{id}/members` | Team list / owner: add someone or change their role `{email, role}` |
 | DELETE | `/api/farms/{id}/members/{user_id}` | Owner: remove someone; anyone: leave |
 | POST | `/api/farms/{id}/fields` | Owner: move fields you own onto this farm |
+| GET | `/api/fields/{id}/timing` | Planting window / emergence / stand count status, soil temp, GDD, TODOs |
 | GET | `/api/log/kinds` | Activity kinds and their field schemas (drives the log forms) |
 | GET/POST | `/api/farms/{id}/log` | Farm log (filters: `field_id`, `kind`, `year`, `history`) / add, correct (`supersedes_id`), or void an entry |
 | GET | `/api/fields/{id}/log` | One field's log (also for one-field shares) |
