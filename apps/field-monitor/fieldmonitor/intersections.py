@@ -30,12 +30,15 @@ from shapely.ops import nearest_points
 
 log = logging.getLogger(__name__)
 
-OVERPASS_URL = os.getenv("FIELD_MONITOR_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+# Public Overpass servers, tried in order (comma-separated override: FIELD_MONITOR_OVERPASS_URL).
+OVERPASS_URLS = [u.strip() for u in os.getenv(
+    "FIELD_MONITOR_OVERPASS_URL",
+    "https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter").split(",") if u.strip()]
 SPLIT = re.compile(r"\s+(?:and|at)\s+|\s*[&/+]\s*", re.I)
 SUFFIXES = {"road", "rd", "street", "st", "avenue", "ave", "av", "highway", "hwy", "lane", "ln", "drive", "dr",
             "boulevard", "blvd", "trail", "trl", "parkway", "pkwy", "way", "court", "ct", "place", "pl", "circle", "cir"}
 DIRECTIONS = {"n", "s", "e", "w", "north", "south", "east", "west", "ne", "nw", "se", "sw"}
-HALF_DEG_LAT = 0.5          # search box: +/- 0.5 deg lat (~35 mi), lon scaled to match
+SEARCH_BOXES = (0.25, 0.6)   # half-size in degrees latitude: first ~17 mi around the point, then ~40 mi
 GAP_M = 30                  # roads that stop short of each other still count as meeting within this
 MIN_GAP_S = 0.6             # space Overpass requests (fair use)
 CACHE_S = 24 * 3600
@@ -98,19 +101,34 @@ class Intersections:
                     return []
                 time.sleep(wait)
             self._last = time.monotonic()
-        lat, lon = near
-        dlon = HALF_DEG_LAT / max(0.2, math.cos(math.radians(lat)))
-        bbox = f"{lat - HALF_DEG_LAT:.4f},{lon - dlon:.4f},{lat + HALF_DEG_LAT:.4f},{lon + dlon:.4f}"
-        sel = lambda rx: (f'way["highway"]["name"~"{rx}",i]({bbox});'  # noqa: E731
-                          f'way["highway"]["ref"~"{rx}",i]({bbox});')
-        query = f"[out:json][timeout:20];({sel(ra)}{sel(rb)});out tags geom;"
-        r = self.http_post(OVERPASS_URL, data={"data": query}, headers={"User-Agent": self.user_agent}, timeout=25.0)
-        r.raise_for_status()
-        out = crossings(r.json(), ra, rb, near)
+        out: list[dict[str, Any]] = []
+        for half in SEARCH_BOXES:  # near first (fast); widen only if nothing crosses nearby
+            out = crossings(self._query(ra, rb, near, half), ra, rb, near)
+            if out:
+                break
         self._cache[key] = (time.monotonic(), out)
         while len(self._cache) > 256:
             self._cache.popitem(last=False)
         return out[:limit]
+
+
+    def _query(self, ra: str, rb: str, near: tuple[float, float], half: float) -> dict[str, Any]:
+        lat, lon = near
+        dlon = half / max(0.2, math.cos(math.radians(lat)))
+        bbox = f"{lat - half:.4f},{lon - dlon:.4f},{lat + half:.4f},{lon + dlon:.4f}"
+        sel = lambda rx: (f'way["highway"]["name"~"{rx}",i]({bbox});'  # noqa: E731
+                          f'way["highway"]["ref"~"{rx}",i]({bbox});')
+        query = f"[out:json][timeout:20];({sel(ra)}{sel(rb)});out tags geom;"
+        last_exc: Exception = RuntimeError("no Overpass server configured")
+        for url in OVERPASS_URLS:  # fall through to the next public server when one is busy or down
+            try:
+                r = self.http_post(url, data={"data": query}, headers={"User-Agent": self.user_agent}, timeout=25.0)
+                r.raise_for_status()
+                return r.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("Overpass %s failed: %s", url, exc.__class__.__name__)
+                last_exc = exc
+        raise last_exc
 
 
 def _matches(rx: str, tags: dict[str, Any]) -> bool:

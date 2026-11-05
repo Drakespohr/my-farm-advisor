@@ -333,13 +333,38 @@
   let suggestTimer = null;
   function closeSearch() { $("search-results").hidden = true; $("search-input").setAttribute("aria-expanded", "false"); }
   function searchNote(text) { return el("li", { class: "small muted search-note", text }); }
+  // A search pin you can click: shows where it is and offers to map a field right there.
+  function pinPopup(p) {
+    const box = el("div", { class: "small pin-pop" }, el("strong", { text: p.name }), el("br"),
+      el("span", { class: "muted", text: `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}${p.miles != null ? ` · ${p.miles} mi away` : ""}` }));
+    box.append(el("button", { type: "button", class: "btn action small-btn", text: "＋ Map a field here", onclick: () => {
+      map.closePopup();
+      if (!mapper.mode) mapperOpen("new");
+      closeSearch();
+      $("search-input").blur();  // keep the map clear for tapping corners
+      map.setView([p.lat, p.lon], 17, { animate: false });
+      $("mapper-hint").textContent = `Tap the corners of the field next to ${p.name}.`;
+    } }));
+    return box;
+  }
+  function dropPin(p, label = "") {
+    const html = label ? `<div class="search-pin numbered"><span>${label}</span></div>` : '<div class="search-pin"></div>';
+    return L.marker([p.lat, p.lon], { title: p.name, icon: L.divIcon({ className: "", html, iconSize: [26, 26], iconAnchor: [13, 26], popupAnchor: [0, -24] }) })
+      .bindPopup(() => pinPopup(p), { maxWidth: 280 }).addTo(searchPin);
+  }
   function goToPlace(p) {
     closeSearch();
     searchPin.clearLayers();
     if (p.bbox && p.kind === "place") map.fitBounds(p.bbox, { maxZoom: 17 });
     else map.setView([p.lat, p.lon], Math.max(map.getZoom(), 16));
-    L.marker([p.lat, p.lon], { title: p.name, icon: L.divIcon({ className: "", html: '<div class="search-pin"></div>', iconSize: [22, 22], iconAnchor: [11, 22], popupAnchor: [0, -20] }) }).bindPopup(el("div", { class: "small" },
-      el("strong", { text: p.name }), el("br"), `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`)).addTo(searchPin).openPopup();
+    dropPin(p).openPopup();
+  }
+  // Several crossroads match (rural road names repeat): pin them all, numbered, nearest first.
+  function pinAll(places) {
+    searchPin.clearLayers();
+    const markers = places.map((p, i) => dropPin(p, String(i + 1)));
+    map.setView([places[0].lat, places[0].lon], 16);
+    markers[0].openPopup();
   }
   function goToField(f) {
     closeSearch();
@@ -378,12 +403,24 @@
           p.name, el("span", { class: "muted", text: near + (p.source ? ` · ${p.source}` : "") }))));
       }
       if (res.error) list.append(searchNote(res.error));
-      if (!res.fields.length && !res.places.length && !res.error)
-        list.append(searchNote("No matches. Try a field name, an address (1234 Road 12, Aurora NE), a town, or 'lat, lon'."));
+      const crosses = res.places.filter((p) => p.kind === "intersection");
+      if (crosses.length) { pinAll(crosses); list.hidden = crosses.length === 1; return; }  // pins on the map
+      if (!res.fields.length && !res.places.length) {
+        if (!res.error) list.append(searchNote("No matches. Try a field name, an address (1234 Road 12, Aurora NE), crossroads (250th and Waverly Rd), a town, or 'lat, lon'."));
+        explainUnreachable(list);
+      }
     } catch (err) {
-      list.replaceChildren(searchNote(err.message));
+      list.replaceChildren(searchNote(`Search failed: ${err.message}. Reload the page; if it keeps happening, restart Overacre.`));
     }
   });
+  // When nothing is found, say which lookup services this server can't reach (instead of silence).
+  async function explainUnreachable(list) {
+    try {
+      const h = await api("/api/search/health");
+      const down = Object.entries(h).filter(([, v]) => v.ok === false).map(([k]) => k);
+      if (down.length) list.append(searchNote(`Not reachable from this server right now: ${down.join(", ")}.`));
+    } catch (_) { /* best effort */ }
+  }
   map.on("click", closeSearch);
 
   // Type-ahead like a maps search bar: one list of the 5 most likely matches while you type
@@ -420,9 +457,18 @@
     goToPlace({ ...it, kind: it.type === "coordinates" ? "coordinates" : "place" });
   }
   const ICONS = { field: "▦", place: "📍", coordinates: "⌖", intersection: "✚" };
+  const looksLikeCrossroads = (q) => /\S{2,}\s+(and|at)\s+\S{2,}|\S{2,}\s*[&/+]\s*\S{2,}/i.test(q);
+  function crossroadsRow(q) {
+    return el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: "sugg-x", class: "sugg sugg-place",
+      onclick: () => $("search-form").requestSubmit() },
+      el("span", { class: "sugg-icon", "aria-hidden": "true", text: "✚" }),
+      el("span", { class: "sugg-text" }, el("span", { class: "sugg-main", text: `Find crossroads: ${q}` }),
+        el("span", { class: "sugg-sub", text: "Press Enter to drop a pin where the roads cross" }))));
+  }
   function renderSuggestions(res, q) {
     const list = $("search-results");
     list.replaceChildren();
+    if (looksLikeCrossroads(q) && !res.items.some((it) => it.kind === "intersection")) list.append(crossroadsRow(q));
     res.items.forEach((it, n) => {
       list.append(el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: `sugg-${n}`, class: `sugg sugg-${it.type}`,
         onclick: () => pickSuggestion(it) },
@@ -430,7 +476,7 @@
         el("span", { class: "sugg-text" }, el("span", { class: "sugg-main" }, ...highlight(it.main, q)),
           it.secondary ? el("span", { class: "sugg-sub", text: it.secondary }) : null))));
     });
-    if (!res.items.length) list.append(searchNote(res.error || "No suggestions yet. Keep typing, or press Search."));
+    if (!res.items.length && !looksLikeCrossroads(q)) list.append(searchNote(res.error || "No suggestions yet. Keep typing, or press Search."));
     else if (res.error) list.append(searchNote(res.error));
     if (res.source === "Google") list.append(el("li", { class: "sugg-credit", text: "Address suggestions by Google" }));
     list.hidden = false;
@@ -445,13 +491,23 @@
       if (seq !== suggestSeq || $("search-input").value.trim() !== q) return; // a newer keystroke won
       state.suggestions = res.items;
       renderSuggestions(res, q);
-    } catch (_) { /* typing shouldn't show errors; the Search button still runs the full search */ }
+    } catch (err) {
+      if (seq !== suggestSeq) return;
+      const list = $("search-results");
+      list.replaceChildren(...(looksLikeCrossroads(q) ? [crossroadsRow(q)] : []),
+        searchNote(`Suggestions aren't loading (${err.message}). Press Enter to search, or reload the page.`));
+      list.hidden = false;
+    }
   }
   $("search-input").addEventListener("input", () => {
     clearTimeout(suggestTimer);
     const q = $("search-input").value.trim();
     state.suggestions = [];
     if (q.length < 2) { suggestSeq++; closeSearch(); return; }
+    if (looksLikeCrossroads(q)) {  // instant: no waiting on the road lookup to offer it
+      $("search-results").replaceChildren(crossroadsRow(q));
+      $("search-results").hidden = false;
+    }
     suggestTimer = setTimeout(() => fetchSuggestions(q), 200);
   });
   $("search-input").addEventListener("keydown", (e) => {

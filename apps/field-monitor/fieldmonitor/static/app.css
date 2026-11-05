@@ -643,3 +643,8 @@ label > input[type=text], label > input[type=email], label > input[type=password
 .view a:not([class]) { color: var(--brand); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .view a:not([class]) { color: #6CC7B2; } }
 :root[data-theme="dark"] .view a:not([class]) { color: #6CC7B2; }
+
+/* Numbered search pins (several crossroads) and the pin popup */
+.search-pin.numbered { width: 26px; height: 26px; display: grid; place-items: center; }
+.search-pin.numbered span { transform: rotate(45deg); font: 700 12px/1 system-ui, sans-serif; color: #1C1C1A; }
+.pin-pop .btn { margin-top: 8px; width: 100%; justify-content: center; }

@@ -142,7 +142,12 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         if request.url.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
             if request.headers.get("x-requested-with") != "fieldmonitor":
                 return JSONResponse({"detail": "Missing X-Requested-With header."}, status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        # The page's own files: always check for a newer version, so an update shows after a restart
+        # (a cached old script talking to a new server is how features silently stop working).
+        if not request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     def require_user(request: Request) -> dict[str, Any]:
         user = accounts.session_user(request.cookies.get(SESSION_COOKIE))
@@ -396,6 +401,11 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         fields = [f for f in store.list_fields(True) if f["id"] in mine]
         near = (lat, lon) if lat is not None and lon is not None else None
         return mapsearch.search(q, fields, geocoder, app.state.intersections, near)
+
+    @app.get("/api/search/health")
+    def search_health(user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Which lookup services this server can reach right now (shown when a search finds nothing)."""
+        return mapsearch.service_health(geocoder, app.state.intersections, app.state.google_places)
 
     @app.get("/api/search/suggest")
     def search_suggest(q: str = Query(..., min_length=1, max_length=200), lat: float | None = Query(None, ge=-90, le=90),

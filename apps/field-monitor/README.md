@@ -346,6 +346,11 @@ Address suggestions come from **Google Places** when you set your own key, other
 Each search uses one Google session token: the suggestions while you type plus one Place Details
 call when you pick an address. The key stays on the server; the browser never sees it.
 
+Search pins: picking a place, address, or crossroads drops a pin; several crossroads matches are
+pinned and numbered, nearest first. **Click a pin → "＋ Map a field here"** opens the field mapper
+zoomed in at that spot. If nothing is found, the search says which lookup services this server
+can't reach (`GET /api/search/health`), so a blocked network never looks like "nothing happened".
+
 Results list **your fields first**: the field the point falls in, then fields within 3 miles (by
 edge distance), then name matches. Tap a field to open it; tap a place to drop a pin there.
 Only your own and shared fields are searched. Coordinates and field names work offline; if the
