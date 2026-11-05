@@ -1267,7 +1267,7 @@
       el("p", { class: `timing-head tone-${tone}`, text: t.headline }));
     const act = TIMING_ACTION[t.status];
     if (act && state.fieldLog && state.fieldLog.canWrite) {
-      p.append(el("button", { type: "button", class: `btn ${t.priority >= 2 ? "primary" : "ghost"} small-btn`, text: act[1],
+      p.append(el("button", { type: "button", class: `btn ${t.priority >= 2 ? "action" : "ghost"} small-btn`, text: act[1],
         onclick: () => { state.fieldLog.openForm(act[0]); $("field-log").scrollIntoView({ behavior: "smooth", block: "start" }); } }));
     }
     if (t.todo && t.todo.length) {

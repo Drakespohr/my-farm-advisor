@@ -98,7 +98,7 @@
         t.type === "check" ? [inp, " ", label] : [label, inp]));
     }
     form.append(grid, msg, el("div", { class: "row gap" },
-      el("button", { class: "btn primary", type: "submit", text: supersedes ? "Save correction" : "Save entry" }),
+      el("button", { class: "btn action", type: "submit", text: supersedes ? "Save correction" : "Save entry" }),
       el("button", { class: "btn ghost", type: "button", text: "Cancel", onclick: onCancel })));
     form.addEventListener("submit", async (e) => {
       e.preventDefault();

@@ -43,6 +43,25 @@ current.
 
 See also [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md) for everything to do before real customers.
 
+## Brand colors
+
+Use these everywhere: app, app icon (`fieldmonitor/static/icons/`), the morning widget when it's
+built, and main buttons. Tokens live at the top of `fieldmonitor/static/app.css`.
+
+| Role | Light | Dark | Used for |
+|---|---|---|---|
+| Primary, deep teal-green | `#0F5C4D` | `#1F7A67` (text `#6CC7B2`) | Primary buttons, avatar, active tab, your chat bubbles, links, "All clear" |
+| Accent, warm amber | `#E8A33D` (text on it `#1C1C1A`) | `#F0B04F` | Actions and highlights: Save log entry, Log stand count, "window open" |
+| Background, warm off-white | `#F7F5F0` (cards `#FFFDF9`) | `#141412` (cards `#1C1B18`) | Page and cards |
+| Text, near-black | `#1C1C1A` | `#F2F0EA` | Body text |
+| Warm grays | `#57534B`, `#77716A`, borders `#DDD7CC` | `#CAC5BA`, `#9D978B`, `#3A3832` | Secondary text, dividers, inputs |
+
+All text/background pairs meet WCAG AA (4.5:1 or better) in both modes.
+
+**Field status never relies on color alone.** Every status shows an icon and a word:
+✓ **All clear** (teal), ⚠ **Scout today** (brick `#B4472B`), ◆ **Planting window open /
+Stand count due** (amber; spray windows will use it too), ◌ **Waiting for imagery** (gray).
+
 ## Farms and team roles
 
 A **farm** holds fields, and people get **one role on the whole farm**: owner, operator,
