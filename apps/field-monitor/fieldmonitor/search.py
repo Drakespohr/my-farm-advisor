@@ -187,6 +187,32 @@ class Geocoder:
             self._suggest_cache.popitem(last=False)
         return out
 
+    def photon_roads(self, q: str, near: tuple[float, float], half_deg: float = 0.5) -> list[dict[str, Any]]:
+        """Roads (OpenStreetMap highways) whose name loosely matches `q` near a point. Photon is
+        typo-tolerant, so "waverley" still finds Waverly Road."""
+        key = ("roads", q.strip().lower(), round(near[0], 1), round(near[1], 1))
+        hit = self._suggest_cache.get(key)
+        if hit and time.monotonic() - hit[0] < SUGGEST_CACHE_SECONDS:
+            return hit[1]
+        lat, lon = near
+        dlon = half_deg / max(0.2, math.cos(math.radians(lat)))
+        params: dict[str, Any] = {"q": q, "limit": 15, "lang": "en", "osm_tag": "highway",
+                                  "lat": round(lat, 3), "lon": round(lon, 3),
+                                  "bbox": f"{lon - dlon:.4f},{lat - half_deg:.4f},{lon + dlon:.4f},{lat + half_deg:.4f}"}
+        r = self.http_get(PHOTON_URL, params=params, headers={"User-Agent": self.user_agent}, timeout=6.0)
+        r.raise_for_status()
+        out = []
+        for f in r.json().get("features", []):
+            pr = f.get("properties") or {}
+            if pr.get("osm_key") not in (None, "highway") or not pr.get("name"):
+                continue
+            rlon, rlat = f["geometry"]["coordinates"][:2]
+            out.append({"name": pr["name"], "lat": float(rlat), "lon": float(rlon), "extent": pr.get("extent"),
+                        "county": pr.get("county"), "state": pr.get("state"),
+                        "place": pr.get("city") or pr.get("town") or pr.get("village")})
+        self._suggest_cache[key] = (time.monotonic(), out)
+        return out
+
     def lookup(self, q: str) -> tuple[list[dict[str, Any]], Optional[str]]:
         """(places, error message or None). Tries Census first for street addresses."""
         errors = []
@@ -210,7 +236,7 @@ def search(q: str, fields: list[dict[str, Any]], geocoder: Geocoder, intersectio
     error = None
     crosses: list[dict[str, Any]] = []
     if not coords:
-        crosses, error = find_intersections(q, fields, intersections, near, partial=False)
+        crosses, error = find_intersections(q, fields, intersections, near, partial=False, geocoder=geocoder)
     if crosses:
         places = crosses
     elif coords:
@@ -367,22 +393,48 @@ def _fields_center(fields: list[dict[str, Any]]) -> Optional[tuple[float, float]
 
 
 def find_intersections(q: str, fields: list[dict[str, Any]], finder: Any, near: Optional[tuple[float, float]],
-                       partial: bool) -> tuple[list[dict[str, Any]], Optional[str]]:
-    """Road crossings for "A and B" near the map view (or the user's fields). (items, error)."""
+                       partial: bool, geocoder: Optional[Geocoder] = None) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Road crossings for "A and B" near the map view (or the user's fields). (items, error).
+
+    1) Exact: OpenStreetMap road shapes from Overpass. 2) If Overpass can't be reached or finds
+    nothing: Photon's typo-tolerant road search, with grid crossings worked out from where each road
+    runs (labelled approximate). 3) If still no crossing: the best-matching roads and places
+    themselves, so there are always options to pick.
+    """
     from . import intersections as ix
-    if finder is None or not ix.parse(q):
+    sides = ix.parse(q)
+    if finder is None or not sides:
         return [], None
     point = near or _fields_center(fields)
     if point is None:
         return [], None
+    items: list[dict[str, Any]] = []
+    error: Optional[str] = None
     try:
         items = finder.find(q, point, partial=partial)
     except Exception as exc:  # never let a road lookup break search
         log.warning("intersection lookup failed: %s", exc.__class__.__name__)
-        return [], "Couldn't reach OpenStreetMap to find that crossroads right now. Try again in a minute."
+        error = f"Exact crossroads lookup (OpenStreetMap Overpass) isn't reachable ({exc.__class__.__name__})."
+    if not items and geocoder is not None:
+        try:
+            roads_a = geocoder.photon_roads(sides[0], point)
+            roads_b = geocoder.photon_roads(sides[1], point)
+            items = ix.approx_crossings(roads_a, roads_b, point)
+            if not items:  # no crossing: offer the closest matches instead of nothing
+                items = ix.road_options(roads_a, roads_b, point)
+                try:
+                    towns = [p for p in geocoder.photon(sides[1], point) if p.get("kind") == "place"][:1]
+                except Exception:
+                    towns = []
+                items = (items + [{**t, "type": "place", "main": t["name"].split(", ")[0],
+                                   "secondary": ", ".join(t["name"].split(", ")[1:])} for t in towns])[:5]
+            if items:
+                error = None
+        except Exception as exc:
+            log.warning("road suggestions failed: %s", exc.__class__.__name__)
     for it in items:
         it["fields_near"] = [m["id"] for m in match_fields("", fields, [(it["lat"], it["lon"])])]
-    return items, None
+    return items, error
 
 
 def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
@@ -404,7 +456,7 @@ def suggest(q: str, fields: list[dict[str, Any]], geocoder: Geocoder,
                          "name": f"{coords[0]:.6f}, {coords[1]:.6f}", "lat": coords[0], "lon": coords[1], "bbox": None}]
         out["items"] += [_field_item(f) for f in match_fields("", fields, [coords])[:MAX_SUGGESTIONS - 1]]
         return out
-    crosses, cross_err = find_intersections(q, fields, intersections, near, partial=True)
+    crosses, cross_err = find_intersections(q, fields, intersections, near, partial=True, geocoder=geocoder)
     if crosses:  # "250th and Waverly": the crossing itself, then your fields next to it
         out["items"] = crosses[:2] + [_field_item(f) for f in match_fields("", fields, [(crosses[0]["lat"], crosses[0]["lon"])])][:3]
         out["source"] = "OpenStreetMap"

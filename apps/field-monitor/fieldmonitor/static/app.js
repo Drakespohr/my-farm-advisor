@@ -355,7 +355,7 @@
   function goToPlace(p) {
     closeSearch();
     searchPin.clearLayers();
-    if (p.bbox && p.kind === "place") map.fitBounds(p.bbox, { maxZoom: 17 });
+    if (p.bbox && (p.kind === "place" || p.kind === "road")) map.fitBounds(p.bbox, { maxZoom: 17 });
     else map.setView([p.lat, p.lon], Math.max(map.getZoom(), 16));
     dropPin(p).openPopup();
   }
@@ -417,7 +417,7 @@
   async function explainUnreachable(list) {
     try {
       const h = await api("/api/search/health");
-      const down = Object.entries(h).filter(([, v]) => v.ok === false).map(([k]) => k);
+      const down = Object.entries(h).filter(([, v]) => v.ok === false).map(([k, v]) => `${k} (${v.error})`);
       if (down.length) list.append(searchNote(`Not reachable from this server right now: ${down.join(", ")}.`));
     } catch (_) { /* best effort */ }
   }
@@ -454,9 +454,9 @@
       }
       return;
     }
-    goToPlace({ ...it, kind: it.type === "coordinates" ? "coordinates" : "place" });
+    goToPlace({ ...it, kind: it.type === "coordinates" ? "coordinates" : it.kind === "road" ? "road" : "place" });
   }
-  const ICONS = { field: "▦", place: "📍", coordinates: "⌖", intersection: "✚" };
+  const ICONS = { field: "▦", place: "📍", coordinates: "⌖", intersection: "✚", road: "═" };
   const looksLikeCrossroads = (q) => /\S{2,}\s+(and|at)\s+\S{2,}|\S{2,}\s*[&/+]\s*\S{2,}/i.test(q);
   function crossroadsRow(q) {
     return el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: "sugg-x", class: "sugg sugg-place",
@@ -472,7 +472,7 @@
     res.items.forEach((it, n) => {
       list.append(el("li", { role: "option" }, el("button", { type: "button", "data-suggest": "1", id: `sugg-${n}`, class: `sugg sugg-${it.type}`,
         onclick: () => pickSuggestion(it) },
-        el("span", { class: "sugg-icon", "aria-hidden": "true", text: ICONS[it.kind === "intersection" ? "intersection" : it.type] || "📍" }),
+        el("span", { class: "sugg-icon", "aria-hidden": "true", text: ICONS[["intersection", "road"].includes(it.kind) ? it.kind : it.type] || "📍" }),
         el("span", { class: "sugg-text" }, el("span", { class: "sugg-main" }, ...highlight(it.main, q)),
           it.secondary ? el("span", { class: "sugg-sub", text: it.secondary }) : null))));
     });
