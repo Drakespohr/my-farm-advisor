@@ -324,7 +324,11 @@ The search bar at the top of the map is always there. Type any of:
 - a crossroads (`250th and Waverly Road`, `250th & Waverly Rd`, `Hwy 6 / 148th`): the two roads are
   looked up in OpenStreetMap ([Overpass API](https://overpass-api.de), free with fair use) within
   about 35 miles of the map view (or your fields) and the crossing nearest you is listed first, with
-  its distance. Partial names work while typing ("250th and wav");
+  its distance. Partial names work while typing ("250th and wav"). If Overpass can't be reached
+  (some networks block it), or finds nothing, Photon's typo-tolerant road search is used instead
+  ("waverley" finds Waverly Road): grid roads that run north–south and east–west give an
+  **approximate** crossing, labelled as such. With no crossing at all, the closest-matching roads
+  and towns are offered, so the dropdown always has options;
 - a town, road, or landmark: OpenStreetMap Nominatim (US only; set
   `FIELD_MONITOR_GEOCODE_COUNTRIES` to change, empty for worldwide).
 

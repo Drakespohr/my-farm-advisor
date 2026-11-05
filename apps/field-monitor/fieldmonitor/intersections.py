@@ -42,6 +42,7 @@ SEARCH_BOXES = (0.25, 0.6)   # half-size in degrees latitude: first ~17 mi aroun
 GAP_M = 30                  # roads that stop short of each other still count as meeting within this
 MIN_GAP_S = 0.6             # space Overpass requests (fair use)
 CACHE_S = 24 * 3600
+DOWN_BACKOFF_S = 300        # after Overpass fails, use the Photon fallback for 5 minutes
 
 
 def parse(q: str) -> Optional[tuple[str, str]]:
@@ -81,6 +82,7 @@ class Intersections:
         self._lock = threading.Lock()
         self._last = 0.0
         self._cache: "OrderedDict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]]" = OrderedDict()
+        self._down_until = 0.0  # after a failure, skip Overpass for a while so typing never hangs
 
     def find(self, q: str, near: tuple[float, float], partial: bool = False, limit: int = 3) -> list[dict[str, Any]]:
         """Crossings of the two roads in `q`, nearest to `near` first. [] if none or not an intersection."""
@@ -94,6 +96,8 @@ class Intersections:
         hit = self._cache.get(key)
         if hit and time.monotonic() - hit[0] < CACHE_S:
             return hit[1][:limit]
+        if time.monotonic() < self._down_until:
+            raise OverpassDown("Overpass failed recently; trying again in a few minutes")
         with self._lock:
             wait = MIN_GAP_S - (time.monotonic() - self._last)
             if wait > 0:
@@ -102,17 +106,21 @@ class Intersections:
                 time.sleep(wait)
             self._last = time.monotonic()
         out: list[dict[str, Any]] = []
-        for half in SEARCH_BOXES:  # near first (fast); widen only if nothing crosses nearby
-            out = crossings(self._query(ra, rb, near, half), ra, rb, near)
-            if out:
-                break
+        try:
+            for half in SEARCH_BOXES:  # near first (fast); widen only if nothing crosses nearby
+                out = crossings(self._query(ra, rb, near, half, timeout=8.0 if partial else 25.0), ra, rb, near)
+                if out:
+                    break
+        except Exception:
+            self._down_until = time.monotonic() + DOWN_BACKOFF_S
+            raise
         self._cache[key] = (time.monotonic(), out)
         while len(self._cache) > 256:
             self._cache.popitem(last=False)
         return out[:limit]
 
 
-    def _query(self, ra: str, rb: str, near: tuple[float, float], half: float) -> dict[str, Any]:
+    def _query(self, ra: str, rb: str, near: tuple[float, float], half: float, timeout: float = 25.0) -> dict[str, Any]:
         lat, lon = near
         dlon = half / max(0.2, math.cos(math.radians(lat)))
         bbox = f"{lat - half:.4f},{lon - dlon:.4f},{lat + half:.4f},{lon + dlon:.4f}"
@@ -122,7 +130,7 @@ class Intersections:
         last_exc: Exception = RuntimeError("no Overpass server configured")
         for url in OVERPASS_URLS:  # fall through to the next public server when one is busy or down
             try:
-                r = self.http_post(url, data={"data": query}, headers={"User-Agent": self.user_agent}, timeout=25.0)
+                r = self.http_post(url, data={"data": query}, headers={"User-Agent": self.user_agent}, timeout=timeout)
                 r.raise_for_status()
                 return r.json()
             except (httpx.HTTPError, ValueError) as exc:
@@ -183,3 +191,89 @@ def crossings(data: dict[str, Any], ra: str, rb: str, near: tuple[float, float])
 def _dist(a: tuple[float, float], f: dict[str, Any]) -> float:
     dx = (f["lon"] - a[1]) * math.cos(math.radians(a[0]))
     return math.hypot(f["lat"] - a[0], dx)
+
+
+class OverpassDown(RuntimeError):
+    pass
+
+
+# ---- fallback: crossings from Photon road matches (no road shapes) -------------------------
+# Photon returns a point and a bounding box ("extent": [minLon, maxLat, maxLon, minLat]) per road.
+# Rural roads run on a north-south / east-west grid, so a long, thin box tells us which way a road
+# runs, and the crossing of a north-south road and an east-west road is (east-west road's latitude,
+# north-south road's longitude). Results are labelled approximate.
+
+PAD = 0.01  # degrees of slack when checking a crossing lies along both roads (~0.7 mi)
+
+
+def _box(r: dict[str, Any]) -> Optional[tuple[float, float, float, float]]:
+    ext = r.get("extent")
+    if ext and len(ext) == 4:
+        return float(ext[0]), float(ext[3]), float(ext[2]), float(ext[1])  # minLon, minLat, maxLon, maxLat
+    return None
+
+
+def _orientation(r: dict[str, Any]) -> Optional[str]:
+    b = _box(r)
+    if not b:
+        return None
+    w = (b[2] - b[0]) * math.cos(math.radians((b[1] + b[3]) / 2))
+    h = b[3] - b[1]
+    if h > 2 * w and h > 0.002:
+        return "ns"
+    if w > 2 * h and w > 0.002:
+        return "ew"
+    return None
+
+
+def _where(r: dict[str, Any]) -> str:
+    return ", ".join(x for x in (r.get("place") or r.get("county"), r.get("state")) if x)
+
+
+def approx_crossings(roads_a: list[dict[str, Any]], roads_b: list[dict[str, Any]], near: tuple[float, float],
+                     limit: int = 3) -> list[dict[str, Any]]:
+    found = []
+    for a in roads_a:
+        for b in roads_b:
+            if a["name"] == b["name"]:
+                continue
+            oa, ob = _orientation(a), _orientation(b)
+            ns, ew = (a, b) if (oa, ob) == ("ns", "ew") else (b, a) if (oa, ob) == ("ew", "ns") else (None, None)
+            if ns is None:
+                continue
+            bn, be = _box(ns), _box(ew)
+            lat = (be[1] + be[3]) / 2
+            lon = (bn[0] + bn[2]) / 2
+            if bn[1] - PAD <= lat <= bn[3] + PAD and be[0] - PAD <= lon <= be[2] + PAD:
+                found.append({"lat": round(lat, 6), "lon": round(lon, 6), "a": a["name"], "b": b["name"],
+                              "where": _where(a) or _where(b)})
+    uniq: list[dict[str, Any]] = []
+    for f in sorted(found, key=lambda f: _dist(near, f)):
+        if all(_dist((u["lat"], u["lon"]), f) > 0.003 for u in uniq):
+            uniq.append(f)
+    return [{"type": "place", "kind": "intersection", "approximate": True, "main": f"{u['a']} & {u['b']}",
+             "secondary": " · ".join(x for x in ("Crossroads (approximate)", u["where"], f"{round(_dist(near, u) * 69.0, 1):g} mi away") if x),
+             "name": f"{u['a']} & {u['b']}", "lat": u["lat"], "lon": u["lon"], "bbox": None, "source": "OpenStreetMap",
+             "miles": round(_dist(near, u) * 69.0, 1)} for u in uniq[:limit]]
+
+
+def road_options(roads_a: list[dict[str, Any]], roads_b: list[dict[str, Any]], near: tuple[float, float],
+                 per_side: int = 2) -> list[dict[str, Any]]:
+    """No crossing found: the closest-matching roads on each side, so the user can pick one."""
+    out = []
+    for roads in (roads_a, roads_b):
+        seen = set()
+        for r in sorted(roads, key=lambda r: _dist(near, r)):
+            key = (r["name"].lower(), _where(r))
+            if key in seen:
+                continue
+            seen.add(key)
+            miles = round(_dist(near, r) * 69.0, 1)
+            b = _box(r)
+            out.append({"type": "place", "kind": "road", "main": r["name"],
+                        "secondary": " · ".join(x for x in ("Road", _where(r), f"{miles:g} mi away") if x),
+                        "name": f"{r['name']}{', ' + _where(r) if _where(r) else ''}", "lat": r["lat"], "lon": r["lon"],
+                        "bbox": [[b[1], b[0]], [b[3], b[2]]] if b else None, "source": "OpenStreetMap", "miles": miles})
+            if len(seen) >= per_side:
+                break
+    return out

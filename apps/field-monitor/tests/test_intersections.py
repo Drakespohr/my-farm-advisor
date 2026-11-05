@@ -173,3 +173,70 @@ def test_page_files_are_revalidated_and_health_endpoint(client, monkeypatch):  #
     h = c.get("/api/search/health").json()
     assert h["crossroads (OpenStreetMap Overpass)"] == {"ok": False, "error": "ConnectError"}
     assert h["place suggestions (Photon)"] == {"ok": True}
+
+
+# ---- fallback when Overpass can't be reached: Photon's typo-tolerant road search ---------------
+
+def photon_road(name, ext, county="Lancaster County", place=None):
+    """A Photon road feature; ext = [minLon, maxLat, maxLon, minLat]."""
+    lon, lat = (ext[0] + ext[2]) / 2, (ext[1] + ext[3]) / 2
+    return {"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {"name": name, "osm_key": "highway", "osm_value": "unclassified", "extent": ext,
+                           "county": county, "state": "Nebraska", "countrycode": "US", **({"city": place} if place else {})}}
+
+
+ROADS = {
+    "250th": [photon_road("North 250th Street", [-96.501, 41.00, -96.499, 40.80])],          # runs north-south
+    "waverly": [photon_road("Waverly Road", [-96.60, 40.921, -96.40, 40.919]),                # runs east-west
+                photon_road("Waverly Road", [-96.70, 41.551, -96.40, 41.549], county="Saunders County")],
+}
+
+
+class FakePhotonRoads:
+    def __init__(self, roads=ROADS):
+        self.roads, self.calls = roads, []
+
+    def __call__(self, url, params=None, headers=None, timeout=None):
+        self.calls.append(params)
+        q = params["q"].lower()
+        feats = [f for k, v in self.roads.items() if k[:4] in q or q[:4] in k for f in v] if params.get("osm_tag") == "highway" else [
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-96.53, 40.92]},
+             "properties": {"name": "Waverly", "county": "Lancaster County", "state": "Nebraska", "countrycode": "US"}}]
+        return httpx.Response(200, json={"features": feats}, request=httpx.Request("GET", url))
+
+
+def photon_geo(roads=ROADS):
+    from fieldmonitor.search import Geocoder
+    return Geocoder("test-agent", http_get=FakePhotonRoads(roads))
+
+
+def test_overpass_unreachable_falls_back_to_approximate_grid_crossing():
+    down = finder(FakeOverpass(fail=True))
+    out = suggest("250th and waverley", FIELDS, photon_geo(), near=(40.9, -96.5), intersections=down)  # misspelled
+    first = out["items"][0]
+    assert first["kind"] == "intersection" and first["approximate"]
+    assert (first["lat"], first["lon"]) == (pytest.approx(40.92), pytest.approx(-96.5))
+    assert "Crossroads (approximate)" in first["secondary"] and "Nebraska" in first["secondary"]
+    # The Saunders County Waverly Rd doesn't reach 250th there: no false crossing.
+    assert all(i["lat"] != pytest.approx(41.55) for i in out["items"] if i.get("kind") == "intersection")
+
+
+def test_no_crossing_still_offers_the_closest_roads_and_towns():
+    roads = {"250th": ROADS["250th"], "waverly": [photon_road("Waverly Road", [-97.60, 40.921, -97.40, 40.919])]}  # far apart
+    res = search("250th & waverly", FIELDS, photon_geo(roads), finder(FakeOverpass(fail=True)), near=(40.9, -96.5))
+    kinds = [p.get("kind") for p in res["places"]]
+    assert "intersection" not in kinds and kinds.count("road") == 2 and res["error"] is None
+    assert any(p["main"] == "Waverly" for p in res["places"])  # the town, too
+    assert res["places"][0]["secondary"].startswith("Road · Lancaster County, Nebraska")
+
+
+def test_after_an_overpass_failure_typing_skips_it_for_a_while():
+    fake = FakeOverpass(fail=True)
+    ix = finder(fake)
+    with pytest.raises(httpx.ConnectError):
+        ix.find("250th and Waverly", (40.9, -96.5))
+    n = len(fake.calls)
+    from fieldmonitor.intersections import OverpassDown
+    with pytest.raises(OverpassDown):
+        ix.find("148th and Waverly", (40.9, -96.5))
+    assert len(fake.calls) == n  # no new request: straight to the fallback
