@@ -428,6 +428,19 @@
     return s;
   }
 
+  // Field status for the Today card: always icon + word + color (never color alone).
+  function fieldStatus(f) {
+    const t = f.timing || {};
+    if (t.status === "window_open") return ["s-act", "◆", "Planting window open"];
+    if (t.status === "late") return ["s-act", "◆", "Plant soon"];
+    if (t.status === "stand_count_due" || t.status === "stand_count_overdue") return ["s-act", "◆", "Stand count due"];
+    if (f.priority >= 2) return ["s-scout", "⚠", "Scout today"];
+    if (!f.image) return ["s-wait", "◌", "Waiting for imagery"];
+    return ["s-clear", "✓", "All clear"];
+  }
+  FM.fieldStatus = fieldStatus;
+  const statusBadge = ([cls, ico, label]) => el("span", { class: `status ${cls}` }, el("span", { class: "ico", "aria-hidden": "true", text: ico }), label);
+
   function fieldCard(f) {
     const img = f.image;
     const ch = f.change;
@@ -440,10 +453,12 @@
     const trend = f.trend && f.trend.length > 1 ? sparkline(f.trend.map((t) => t.v)) : null;
     const scoreText = f.score && f.score.score != null
       ? `${f.score.label}${f.score.status === "paused" ? ` · final, ${f.score.as_of_label}` : ""}` : "Score after in-season images";
-    return el("a", { class: `card fcard2 p${f.priority}`, href: `#/fields/${encodeURIComponent(f.id)}` },
+    const st = fieldStatus(f);
+    return el("a", { class: `card fcard2 ${st[0]}`, href: `#/fields/${encodeURIComponent(f.id)}` },
       el("div", { class: "row space" }, el("div", {}, el("b", { class: "fc-name", text: f.name }),
         el("div", { class: "muted small", text: `${FM.fmt(f.area_ac, 0)} ac${f.crop ? " · " + f.crop : ""}${f.role === "viewer" ? " · shared with you" : ""}` })),
         risk ? chip(`Disease: ${risk.level}`, `risk-${risk.level.toLowerCase()}`) : null),
+      el("div", {}, statusBadge(st)),
       el("div", { class: "fc-row" }, miniRing(f.score), el("div", { class: "small" }, el("div", { text: scoreText }), health)),
       trend ? el("div", { class: `fc-trend ${ch && ch.delta < -0.02 ? "down" : ""}` }, el("span", { class: "muted small", text: "Season so far" }), trend) : null,
       f.yield && (f.yield.bu_ac != null || f.yield.method === "relative")
