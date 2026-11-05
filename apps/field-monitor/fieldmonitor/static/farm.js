@@ -79,6 +79,12 @@
       el("p", { class: "muted", text: "For now owners manage the farm and everyone else can see its fields. What each role can change comes next." })));
     p.append(team);
 
+    // Farm log: everything on the farm, farm-level and every field
+    const logBox = el("div", {});
+    p.append(el("section", { class: "card stack" }, el("h2", { text: "Farm log" }), logBox));
+    FM.renderLog(logBox, { farmId: farm.id, fields: farm.field_ids.map((id) => ({ id, name: fieldsById[id] ? fieldsById[id].name : id })), role: farm.my_role })
+      .catch((err) => logBox.replaceChildren(el("p", { class: "muted small", text: `Log unavailable: ${err.message}` })));
+
     // Fields on this farm
     const fsec = el("section", { class: "card stack" }, el("h2", { text: `Fields (${farm.field_ids.length})` }));
     if (!farm.field_ids.length) fsec.append(el("p", { class: "muted", text: "No fields on this farm yet." }));

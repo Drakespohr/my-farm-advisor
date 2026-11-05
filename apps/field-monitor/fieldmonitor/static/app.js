@@ -559,6 +559,7 @@
     renderScore(f.score);
     loadWatch(f);
     loadYield(f);
+    loadFieldLog(f);
     renderSync();
     $("csv-link").href = `/api/fields/${encodeURIComponent(id)}/timeseries.csv`;
     map.fitBounds(L.geoJSON(f.geometry).getBounds(), { padding: [30, 30], maxZoom: 16, animate: false });
@@ -1232,6 +1233,14 @@
         el("li", { text: "Field count: ears × kernels ÷ kernels per bushel (corn); plants × pods × seeds ÷ seeds per lb ÷ 60 (soybeans); heads × kernels ÷ kernels per lb ÷ 60 (wheat)." }),
         el("li", { text: "Satellite: expected yield × how green the field was at peak canopy vs. cropland within 2 km on the same images. Calibrated with your harvests once you have 3+ field-years." }),
         ...(state.yieldSources || []).map((s) => el("li", {}, el("a", { href: s.url, target: "_blank", rel: "noopener", text: s.label }))))));
+  }
+
+  async function loadFieldLog(f) {
+    const box = $("field-log-body");
+    if (!f.farm_id) { box.replaceChildren(el("p", { class: "muted small", text: "This field isn't on a farm yet." })); return; }
+    try {
+      await FM.renderLog(box, { farmId: f.farm_id, fieldId: f.id, fields: [{ id: f.id, name: f.name }], role: f.my_role });
+    } catch (err) { box.replaceChildren(el("p", { class: "muted small", text: `Log unavailable: ${err.message}` })); }
   }
 
   async function loadYield(f) {
