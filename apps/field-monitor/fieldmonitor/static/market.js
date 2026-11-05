@@ -469,6 +469,11 @@
     const first = (b.name || "").split(" ")[0];
     p.replaceChildren(
       el("div", { class: "page-head" }, el("h1", { text: `${hello}${first ? ", " + first : ""}` }), el("span", { class: "muted", text: b.date_label })));
+    for (const fm of b.survey_needed || []) {
+      p.append(el("a", { class: "card survey-banner", href: `#/survey/${encodeURIComponent(fm.farm_id)}` },
+        el("b", { text: "Tell us how you farm" }), el("span", { text: " — 2 minutes, so planting and stand count reminders fit how you work. " }),
+        el("span", { class: "muted", text: fm.name })));
+    }
     if (!b.fields.length) {
       p.append(el("div", { class: "card stack" }, el("p", { text: "Add your first field to start your daily brief." }),
         el("a", { class: "btn primary", href: "#/fields", text: "＋ Map a field" })));

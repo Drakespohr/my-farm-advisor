@@ -204,6 +204,7 @@ def make_router(
     prices: Prices,
     yield_for: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None,
     timing_for: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    surveys: Any = None,
 ) -> APIRouter:
     with accounts.db() as c:
         c.executescript(SCHEMA)
@@ -581,8 +582,12 @@ def make_router(
                 fields.append(field_brief(f, role, today, user))
         fields.sort(key=lambda b: (-b["priority"], b["name"]))
         priorities = [{"field_id": b["id"], "field": b["name"], "text": b["headline"]} for b in fields if b["priority"] >= 2][:3]
+        # Farms this person runs that haven't told us how they farm yet (tailors reminders).
+        my_farms = accounts.farms_for(user["id"]) or [{**accounts.default_farm(user["id"]), "role": "owner"}]
+        survey_needed = [{"farm_id": fm["id"], "name": fm["name"]} for fm in my_farms
+                         if fm["role"] in ("owner", "operator") and surveys is not None and surveys.latest(fm["id"]) is None]
         local = [i for i in feed(section="local", user=user) if i["type"] in ("roundup", "report", "storm")][:4]
         return {"date": today.isoformat(), "date_label": f"{today:%A}, {today:%B} {today.day}", "name": (accounts.profile(user["id"]) or {}).get("display_name"),
-                "priorities": priorities, "fields": fields, "local": local, "prices": prices.board(), "recent_days": RECENT_DAYS}
+                "priorities": priorities, "survey_needed": survey_needed, "fields": fields, "local": local, "prices": prices.board(), "recent_days": RECENT_DAYS}
 
     return r

@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from . import APP_NAME, APP_TAGLINE, APP_TAGLINE_NO_MARKET, PROCESSING_VERSION, marketplace_enabled, __version__, analysis, diagnose, qa, score as scoring
 from . import search as mapsearch
-from . import planting, yields
+from . import planting, survey, yields
 from .planting import SoilWeather
 from .accounts import SESSION_COOKIE, Accounts
 from .feed import Watcher, make_router as make_feed_router
@@ -216,7 +216,8 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             log.warning("soil temperature unavailable for %s: %s", f["id"], exc.__class__.__name__)
             days = None
-        return planting.timing(f.get("crop"), county["state"] if county else None, entries, days, today)
+        prefs = survey.preferences((app.state.surveys.latest(farm) or {}).get("answers"))
+        return planting.timing(f.get("crop"), county["state"] if county else None, entries, days, today, prefs)
 
     app.state.timing_for = timing_for
 
@@ -709,9 +710,36 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     farm_log = FarmLog(accounts)
     app.state.farm_log = farm_log
     app.include_router(make_log_router(accounts, farm_log, require_user))
+    surveys = survey.Surveys(accounts)
+    app.state.surveys = surveys
+
+    @app.get("/api/survey/questions")
+    def survey_questions(user: dict[str, Any] = Depends(require_user)) -> list[dict[str, Any]]:
+        return survey.QUESTIONS
+
+    @app.get("/api/farms/{farm_id}/survey")
+    def get_survey(farm_id: str, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        if not accounts.farm_role(farm_id, user["id"]):
+            raise HTTPException(404, "Unknown farm")
+        return {"farm_id": farm_id, "latest": surveys.latest(farm_id)}
+
+    @app.put("/api/farms/{farm_id}/survey")
+    def save_survey(farm_id: str, body: dict[str, Any], user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
+        """Save the farm's survey answers (owners and operators). Every submission is kept; the newest is used."""
+        role = accounts.farm_role(farm_id, user["id"])
+        if not role:
+            raise HTTPException(404, "Unknown farm")
+        if role not in ("owner", "operator"):
+            raise HTTPException(403, "Only the farm's owner or operator can answer the farm survey.")
+        try:
+            saved = surveys.save(farm_id, user["id"], dict(body.get("answers") or {}))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        store.log("farm.survey_saved", farm_id=farm_id, by=user["id"])
+        return {"farm_id": farm_id, "latest": saved}
     app.include_router(make_feed_router(accounts, store, watcher, require_user, lambda fid, user: field_or_404(fid, user), news, prices,
                                      yield_for=lambda f, user: yield_for(f, user),
-                                     timing_for=lambda f: timing_for(f)))
+                                     timing_for=lambda f: timing_for(f), surveys=surveys))
 
     @app.exception_handler(FileExistsError)
     def conflict(_: Any, exc: FileExistsError) -> JSONResponse:

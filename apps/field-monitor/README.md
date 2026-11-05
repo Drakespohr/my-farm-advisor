@@ -41,6 +41,8 @@ date picker, and Data tab. A field with no clear image for two weeks says so pla
 image in the last 14 days (clouds). Last one: Sep 23.") instead of presenting old numbers as
 current.
 
+See also [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md) for everything to do before real customers.
+
 ## Farms and team roles
 
 A **farm** holds fields, and people get **one role on the whole farm**: owner, operator,
@@ -56,6 +58,26 @@ outside people (a landlord, a lender): it opens only that field, read-only, neve
 Existing data moves over automatically on startup (and any "scout" from earlier versions becomes an
 "agronomist"): each owner's fields go onto their farm, and
 existing one-field shares stay one-field shares (nobody gains access to other fields).
+
+## Opening farm survey
+
+New farmers see **"Tell us how you farm"** on the Today page (also under Farm & team → Settings).
+It's about 15 tap-to-answer questions, and questions only show when they apply (no soybean
+questions if you don't grow soybeans). Owners and operators answer; everyone on the farm can read
+it. Every submission is kept; the newest is used.
+
+What the answers change today:
+
+| Answer | Effect on reminders |
+|---|---|
+| Usual start / finish date per crop | Used instead of the (still TODO) state calendar: "you usually start around Apr 25", "earlier than your usual…", "past your usual finish date" |
+| What tells you to start: calendar or insurance date | Window opens on your date (with a cold-soil warning) instead of waiting on soil temperature |
+| Soil temperature you wait for (corn 50/55, soybeans 50/55/60) | Replaces the 50°F default |
+| Stand counts: not usually | One quiet mention in the window; no overdue reminders |
+| Morning reminder time | Saved for phone notifications (next) |
+
+Tillage, irrigation, planting order, and who scouts and how often are saved for the scouting and
+spray reminders that come later. Edit the questions in `fieldmonitor/survey.py` (`QUESTIONS`).
 
 ## Planting window and stand count reminders
 
@@ -465,6 +487,8 @@ Thresholds were calibrated on the 2025 test season (see validation notes) and li
 | GET/POST | `/api/farms/{id}/members` | Team list / owner: add someone or change their role `{email, role}` |
 | DELETE | `/api/farms/{id}/members/{user_id}` | Owner: remove someone; anyone: leave |
 | POST | `/api/farms/{id}/fields` | Owner: move fields you own onto this farm |
+| GET | `/api/survey/questions` | Survey questions (types: multi, single, monthday; `if` = show only when) |
+| GET/PUT | `/api/farms/{id}/survey` | Latest answers / owner or operator saves `{answers}` |
 | GET | `/api/fields/{id}/timing` | Planting window / emergence / stand count status, soil temp, GDD, TODOs |
 | GET | `/api/log/kinds` | Activity kinds and their field schemas (drives the log forms) |
 | GET/POST | `/api/farms/{id}/log` | Farm log (filters: `field_id`, `kind`, `year`, `history`) / add, correct (`supersedes_id`), or void an entry |

@@ -116,7 +116,8 @@
       const nn = el("input", { type: "text", placeholder: "e.g. Rented ground", maxlength: "120", required: "" });
       const nf = el("form", { class: "row gap wrap end" }, el("label", { class: "grow" }, "Add another farm", nn), el("button", { class: "btn", type: "submit", text: "Create" }));
       nf.addEventListener("submit", async (e) => { e.preventDefault(); try { const f = await api("/api/farms", { method: "POST", body: JSON.stringify({ name: nn.value }) }); location.hash = `#/farm/${encodeURIComponent(f.id)}`; } catch (err) { smsg.textContent = err.message; } });
-      p.append(el("section", { class: "card stack" }, el("h2", { text: "Settings" }), rn, nf, smsg));
+      p.append(el("section", { class: "card stack" }, el("h2", { text: "Settings" }),
+        el("a", { href: `#/survey/${encodeURIComponent(farm.id)}`, text: "How this farm plants (survey) — used to tailor reminders" }), rn, nf, smsg));
     }
   };
 })();

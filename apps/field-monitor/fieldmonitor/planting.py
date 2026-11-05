@@ -180,8 +180,13 @@ def _nice(d: str | date) -> str:
 
 
 def timing(crop: Optional[str], state: Optional[str], log_entries: list[dict[str, Any]], days: Optional[list[Day]],
-           today: Optional[date] = None) -> dict[str, Any]:
-    """What to do next on this field and when. Returns status, headline, priority (0-3), and tasks."""
+           today: Optional[date] = None, prefs: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """What to do next on this field and when. Returns status, headline, priority (0-3), and tasks.
+
+    `prefs` (from the farm's opening survey, see survey.preferences) tailors it: the farmer's usual
+    planting dates, what tells them to start (soil temperature or a date), their soil threshold,
+    and whether they take stand counts.
+    """
     from .yields import crop_kind  # same crop names as the yield estimate
 
     today = today or date.today()
@@ -192,22 +197,30 @@ def timing(crop: Optional[str], state: Optional[str], log_entries: list[dict[str
         out.update(status="no_crop", headline="Set the crop (corn, soybeans, or wheat) for planting and stand count reminders.")
         return out
     rule = RULES[kind]
+    prefs = prefs or {}
+    cp = prefs.get(kind) or {}
     out["todo"] = list(rule.todo)
-    cal = (STATE_CALENDAR.get(state or "", {}) or {}).get(kind) or {}
-    if not cal.get("earliest"):
-        out["todo"].append(f"{state or 'Your state'} {kind} planting dates ({TODO})")
+    state_cal = (STATE_CALENDAR.get(state or "", {}) or {}).get(kind) or {}
+    # The farmer's own usual dates come first; the state calendar fills in (still TODO).
+    cal = {"earliest": cp.get("start") or state_cal.get("earliest"), "latest": cp.get("finish") or state_cal.get("latest"),
+           "source": "your usual" if (cp.get("start") or cp.get("finish")) else "the state guide"}
+    if not cal["earliest"] and not cal["latest"]:
+        out["todo"].append(f"{state or 'Your state'} {kind} planting dates ({TODO}), or add your usual dates in the farm survey")
+    threshold = None if cp.get("no_soil_rule") else cp.get("soil_f", rule.soil_f)
+    by_date = prefs.get("trigger") in ("calendar", "insurance_date") or (threshold is None and rule.soil_f is not None)
+    out["tailored"] = bool(prefs)
 
     observed = [d for d in (days or []) if not d.forecast]
     forecast = [d for d in (days or []) if d.forecast]
     if days:
         last = next((d for d in reversed(observed) if d.soil_f is not None), None)
         out["soil"] = {"today_f": last.soil_f if last else None, "date": last.date if last else None,
-                       "threshold_f": rule.soil_f, "next_days": [{"date": d.date, "soil_f": d.soil_f} for d in forecast[:FORECAST_DAYS]]}
+                       "threshold_f": threshold, "next_days": [{"date": d.date, "soil_f": d.soil_f} for d in forecast[:FORECAST_DAYS]]}
 
     year = today.year
     plantings = _entries(log_entries, "planting", year)
     if not plantings:
-        return _before_planting(out, kind, rule, cal, observed, forecast, today)
+        return _before_planting(out, kind, rule, cal, observed, forecast, today, threshold, by_date)
 
     planted = plantings[-1]["occurred_at"][:10]
     out["planted_on"] = planted
@@ -251,6 +264,13 @@ def timing(crop: Optional[str], state: Optional[str], log_entries: list[dict[str
         return out
 
     task = {"kind": "stand_count", "due": start.isoformat(), "late_after": late.isoformat()}
+    if prefs.get("stand_counts") == "never" and today >= start:
+        # They told us they don't usually count: mention it once in the window, never nag.
+        out.update(status="stand_count_optional", priority=0,
+                   headline=f"Stand count window: {_nice(start)}–{_nice(late)} (optional; you said you don't usually count).")
+        task["state"] = "optional"
+        out["tasks"].append(task)
+        return out
     harvested = _entries(log_entries, "harvest", year)
     if harvested or today > late + timedelta(days=STAND_COUNT_EXPIRES_DAYS):
         # Counts only help replant decisions early on; stop reminding once that chance has passed.
@@ -274,40 +294,60 @@ def timing(crop: Optional[str], state: Optional[str], log_entries: list[dict[str
 
 
 def _before_planting(out: dict[str, Any], kind: str, rule: CropRule, cal: dict[str, Optional[str]], observed: list[Day],
-                     forecast: list[Day], today: date) -> dict[str, Any]:
+                     forecast: list[Day], today: date, threshold: Optional[float], by_date: bool) -> dict[str, Any]:
     m0, m1 = rule.season_months
     crop_word = {"corn": "Corn", "soybean": "Soybean", "wheat": "Wheat"}[kind]
-    if not (m0 <= today.month <= m1):
-        if rule.soil_f is None:
-            out.update(status="off_season", headline=f"{crop_word} planting is by calendar date this fall ({TODO}).")
+    usual = cal.get("source") == "your usual"
+    start_md, finish_md = cal.get("earliest"), cal.get("latest")
+    start_txt = _nice(date(today.year, int(start_md[:2]), int(start_md[3:]))) if start_md else None
+    finish_txt = _nice(date(today.year, int(finish_md[:2]), int(finish_md[3:]))) if finish_md else None
+    in_season = m0 <= today.month <= m1 or (start_md is not None and finish_md is not None and start_md <= _md(today) <= finish_md)
+    if not in_season:
+        if usual and start_txt:
+            out.update(status="off_season", headline=f"{crop_word} planting: you usually start around {start_txt}.")
+        elif rule.soil_f is None or by_date:
+            out.update(status="off_season", headline=f"{crop_word} planting is by calendar date ({TODO}).")
         else:
             out.update(status="off_season",
-                       headline=f"{crop_word} planting window opens in spring once 2-inch soil holds {rule.soil_f:.0f}°F.")
+                       headline=f"{crop_word} planting window opens in spring once 2-inch soil holds {threshold:.0f}°F.")
         return out
-    if cal.get("earliest") and _md(today) < cal["earliest"]:
-        out.update(status="too_early", headline=f"Before the earliest recommended {crop_word.lower()} planting date ({cal['earliest']}).")
-        return out
-    if cal.get("latest") and _md(today) > cal["latest"]:
-        out.update(status="late", priority=2, headline=f"Past the recommended {crop_word.lower()} planting date ({cal['latest']}); plant as soon as conditions allow.")
+    if finish_md and _md(today) > finish_md:
+        out.update(status="late", priority=2,
+                   headline=f"Past {'your usual' if usual else 'the recommended'} {crop_word.lower()} finish date ({finish_txt}); plant as soon as conditions allow.")
         out["tasks"].append({"kind": "planting_window", "state": "late"})
-        return out
-    if rule.soil_f is None:
-        out.update(status="calendar", priority=1, headline=f"{crop_word} planting season: follow your state's dates ({TODO}).")
         return out
     recent = [d.soil_f for d in observed[-RISING_DAYS:] if d.soil_f is not None]
     ahead = [d.soil_f for d in forecast[:FORECAST_DAYS] if d.soil_f is not None]
-    thr = rule.soil_f
+    cold_soon = threshold is not None and ahead and min(ahead) < threshold
+
+    if by_date or threshold is None:
+        # Calendar farmers: the window opens on their date; still warn about a cold snap.
+        if not start_md:
+            out.update(status="calendar", priority=1, headline=f"{crop_word} planting season: follow your state's dates ({TODO}).")
+            return out
+        if _md(today) < start_md:
+            out.update(status="too_early", headline=f"{crop_word} planting starts {start_txt} ({cal['source']} date).")
+            return out
+        warn = f" Cold soil ahead ({min(ahead):.0f}°F) — consider waiting a day or two." if ahead and min(ahead) < (rule.soil_f or 50) else ""
+        out.update(status="window_open", priority=2, headline=f"{crop_word} planting window open ({cal['source']} start date {start_txt}).{warn}")
+        out["tasks"].append({"kind": "planting_window", "state": "open"})
+        return out
+
     if len(recent) < RISING_DAYS:
         out.update(status="no_soil_data", headline="Soil temperature unavailable right now; check before planting.")
         return out
     now_f = recent[-1]
-    if all(v >= thr for v in recent) and ahead and all(v >= thr for v in ahead):
+    early_note = f" (earlier than your usual {start_txt})" if usual and start_md and _md(today) < start_md else ""
+    if not usual and start_md and _md(today) < start_md:
+        out.update(status="too_early", headline=f"Before the earliest recommended {crop_word.lower()} planting date ({start_txt}).")
+        return out
+    if all(v >= threshold for v in recent) and ahead and not cold_soon:
         out.update(status="window_open", priority=2,
-                   headline=f"Planting window open: 2-inch soil {now_f:.0f}°F and holding above {thr:.0f}°F.")
+                   headline=f"Planting window open: 2-inch soil {now_f:.0f}°F and holding above {threshold:.0f}°F{early_note}.")
         out["tasks"].append({"kind": "planting_window", "state": "open"})
-    elif now_f >= thr and ahead and min(ahead) < thr:
+    elif now_f >= threshold and cold_soon:
         out.update(status="cold_snap", priority=1,
                    headline=f"Soil is {now_f:.0f}°F but a cold snap is coming ({min(ahead):.0f}°F). Hold off planting.")
     else:
-        out.update(status="waiting", priority=0, headline=f"Soil {now_f:.0f}°F at 2 inches; planting window opens at {thr:.0f}°F.")
+        out.update(status="waiting", priority=0, headline=f"Soil {now_f:.0f}°F at 2 inches; planting window opens at {threshold:.0f}°F.")
     return out
