@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from . import marketplace_enabled
+from .farmchat import FarmChat, shares_farm
 from .accounts import ROLE_LABELS, ROLES, SESSION_COOKIE, SESSION_DAYS, Accounts, google_config, new_id, now
 from .store import Store
 
@@ -75,7 +76,8 @@ class MessageIn(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
-class StartConversationIn(MessageIn):
+class StartConversationIn(BaseModel):
+    body: str = Field("", max_length=4000, description="First message; empty just opens the conversation")
     to_user_id: str
     listing_id: str | None = None
 
@@ -93,6 +95,11 @@ def make_router(
     field_summary: Callable[[str], dict[str, Any] | None],
 ) -> APIRouter:
     r = APIRouter()
+    farm_chat = FarmChat(accounts)
+
+    def can_direct_message(sender_id: str, other_id: str, listing_id: str | None) -> bool:
+        """Direct messages stay within farm teams; marketplace listing chats are the exception."""
+        return shares_farm(accounts, sender_id, other_id) or bool(listing_id)
 
     def set_session(resp: Response, request: Request, user_id: str) -> None:
         secure = request.url.scheme == "https" or os.environ.get("FIELD_MONITOR_COOKIE_SECURE") == "1"
@@ -357,7 +364,7 @@ def make_router(
                 "LEFT JOIN conversation_reads r ON r.conversation_id=cv.id AND r.user_id=? "
                 "WHERE (cv.a_id=? OR cv.b_id=?) AND m.sender_id!=? AND m.id > COALESCE(r.last_read_id, 0)",
                 (user_id, user_id, user_id, user_id)).fetchone()
-        return int(row[0])
+        return int(row[0]) + farm_chat.unread(user_id)
 
     def conv_or_404(conv_id: str, user: dict[str, Any]) -> dict[str, Any]:
         with accounts.db() as c:
@@ -399,6 +406,8 @@ def make_router(
             raise HTTPException(404, "No such user.")
         if body.listing_id:
             get_listing(body.listing_id, user)
+        if not can_direct_message(user["id"], body.to_user_id, body.listing_id):
+            raise HTTPException(403, "You can message people on your farm teams. Add them to your farm first.")
         a, b = sorted([user["id"], body.to_user_id])
         with accounts.db() as c:
             row = c.execute("SELECT id FROM conversations WHERE a_id=? AND b_id=? AND listing_id IS ?", (a, b, body.listing_id)).fetchone()
@@ -406,7 +415,8 @@ def make_router(
             if not row:
                 c.execute("INSERT INTO conversations (id, a_id, b_id, listing_id, created, updated) VALUES (?,?,?,?,?,?)",
                           (conv_id, a, b, body.listing_id, now(), now()))
-        add_message(conv_id, user["id"], body.body)
+        if body.body.strip():
+            add_message(conv_id, user["id"], body.body)
         return {"id": conv_id}
 
     @r.get("/api/conversations/{conv_id}/messages")
@@ -431,7 +441,10 @@ def make_router(
 
     @r.post("/api/conversations/{conv_id}/messages", status_code=201)
     def reply(conv_id: str, body: MessageIn, user: dict[str, Any] = Depends(require_user)) -> dict[str, Any]:
-        conv_or_404(conv_id, user)
+        conv = conv_or_404(conv_id, user)
+        other = conv["b_id"] if conv["a_id"] == user["id"] else conv["a_id"]
+        if not can_direct_message(user["id"], other, conv["listing_id"]):
+            raise HTTPException(403, "You're no longer on a farm team together, so this conversation is read-only.")
         add_message(conv_id, user["id"], body.body)
         return thread(conv_id, user)
 

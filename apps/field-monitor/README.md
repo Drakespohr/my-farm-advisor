@@ -128,6 +128,22 @@ forecast, cached 3 hours per location). **Its free API is non-commercial only:**
 customers, buy a commercial plan and set `OPEN_METEO_API_KEY` (the app then uses the commercial
 endpoint). If the weather feed is down, the page says so and nothing else breaks.
 
+## Messages: farm team chat and direct messages
+
+- **Team chat:** every farm has one group chat for its whole team (all roles, viewers included).
+  Open it from Messages or the **Team chat** button on Farm & team. Removing someone from the team
+  removes their access to the chat.
+- **Direct messages:** one-to-one, only between people who share a farm team (the **Message** button on
+  each teammate, or "Message a teammate" in Messages). If you stop sharing a farm, old direct messages
+  stay readable but can't be replied to. Marketplace listing chats are the only exception, and only
+  when the marketplace is turned on.
+- Unread counts (team chats + direct) show on the Messages tab. An open chat checks for new messages
+  every 5 seconds. Enter sends; Shift+Enter adds a new line.
+- Phone push notifications for new messages are not built yet (planned with the reminder push work).
+
+API: `GET /api/farm-chats` (your team chats + teammates), `GET|POST /api/farms/{farm_id}/chat`
+(`?after=<id>` for only newer messages), plus the existing `/api/conversations` endpoints.
+
 ## Farm and field log
 
 Everything done on the farm goes in **one shared log**: farm, optional field, when, activity, and

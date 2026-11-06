@@ -706,3 +706,18 @@ label > input[type=text], label > input[type=email], label > input[type=password
   .card { padding: 20px; }
   .detail { padding: 20px 16px 48px; }
 }
+
+/* Farm team chat */
+.convlist-label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-secondary); padding: 14px 8px 6px; }
+.convlist-label:first-child { padding-top: 4px; }
+.convlist select { margin: 4px 0 8px; width: 100%; }
+.avatar.group { background: var(--surface-2); color: var(--brand); }
+.bubble .who { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 2px; }
+.compose p:empty { display: none; }
+.compose { flex-wrap: wrap; } .compose p { flex-basis: 100%; margin: 0; }
+@media (max-width: 480px) {
+  .mainnav { margin-left: 0; gap: 0; }
+  .mainnav a { padding: 6px 7px; font-size: 14px; }
+  .mainnav a.active::after { left: 7px; right: 7px; }
+}
+.thread-head a { color: var(--brand); text-decoration: none; }

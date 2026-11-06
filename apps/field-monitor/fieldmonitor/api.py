@@ -39,6 +39,7 @@ from .prices import Prices
 from .social import make_router
 from .farms import make_router as make_farms_router
 from .farmlog import FarmLog, make_router as make_log_router
+from .farmchat import FarmChat, make_router as make_chat_router
 from .weather import WeatherStore
 from .boundaries import parse_file, parse_geojson
 from .catalog import search_scenes
@@ -747,6 +748,7 @@ def create_app(store: Store | None = None, refresh_hours: float | None = None) -
     farm_log = FarmLog(accounts)
     app.state.farm_log = farm_log
     app.include_router(make_log_router(accounts, farm_log, require_user))
+    app.include_router(make_chat_router(accounts, FarmChat(accounts), require_user))
     surveys = survey.Surveys(accounts)
     app.state.surveys = surveys
 
