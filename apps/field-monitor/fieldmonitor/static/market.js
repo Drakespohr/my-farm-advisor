@@ -416,17 +416,7 @@
   };
 
   // ---------- today: the daily brief ------------------------------------------------
-  function miniRing(sc) {
-    const r = 18, c = 2 * Math.PI * r;
-    const s = FM.svg("svg", { viewBox: "0 0 44 44", class: `ring mini ${sc && sc.score != null ? FM.scoreClass(sc.score) : ""}`, role: "img",
-      "aria-label": sc && sc.score != null ? `Field score ${sc.score} out of 100` : "No score yet" });
-    s.append(FM.svg("circle", { cx: 22, cy: 22, r, class: "track" }));
-    if (sc && sc.score != null) s.append(FM.svg("circle", { cx: 22, cy: 22, r, class: "fill", "stroke-dasharray": `${(c * sc.score) / 100} ${c}`, transform: "rotate(-90 22 22)" }));
-    const t = FM.svg("text", { x: 22, y: 26, "text-anchor": "middle", class: "num" });
-    t.textContent = sc && sc.score != null ? String(sc.score) : "–";
-    s.append(t);
-    return s;
-  }
+
 
   // Field status for the Today card: always icon + word + color (never color alone).
   function fieldStatus(f) {
@@ -441,39 +431,31 @@
   FM.fieldStatus = fieldStatus;
   const statusBadge = ([cls, ico, label]) => el("span", { class: `status ${cls}` }, el("span", { class: "ico", "aria-hidden": "true", text: ico }), label);
 
+  // One glance per field: name, status, one sentence, three numbers, a faint trend. Details live on the field page.
   function fieldCard(f) {
     const img = f.image;
     const ch = f.change;
-    const risk = f.pressure && f.pressure.score != null ? f.pressure : null;
-    const health = img
-      ? el("div", { class: "fc-health" }, el("b", { text: FM.fmt(img.ndvi) }), el("span", { class: "muted", text: " NDVI (0–1)" }),
-          ch ? el("span", { class: `delta ${ch.delta > 0.02 ? "up" : ch.delta < -0.02 ? "down" : "flat"}`,
-            text: ` ${ch.delta > 0.02 ? "▲" : ch.delta < -0.02 ? "▼" : "■"} ${Math.abs(ch.delta).toFixed(2)} since ${ch.since}` }) : null)
-      : el("div", { class: "fc-health muted", text: "No clear image yet" });
-    const trend = f.trend && f.trend.length > 1 ? sparkline(f.trend.map((t) => t.v)) : null;
-    const scoreText = f.score && f.score.score != null
-      ? `${f.score.label}${f.score.status === "paused" ? ` · final, ${f.score.as_of_label}` : ""}` : "Score after in-season images";
     const st = fieldStatus(f);
+    const trend = f.trend && f.trend.length > 1 ? sparkline(f.trend.map((t) => t.v)) : null;
+    const metric = (label, value, sub) => el("div", { class: "fc-metric" },
+      el("span", { class: "fc-label", text: label }), el("span", { class: "fc-value", text: value }), sub ? el("span", { class: "fc-sub", text: sub }) : null);
+    const score = f.score && f.score.score != null ? metric("Score", String(f.score.score), f.score.label) : metric("Score", "—", "after first images");
+    const health = img ? metric("Health", FM.fmt(img.ndvi),
+      ch ? `${ch.delta > 0.02 ? "▲" : ch.delta < -0.02 ? "▼" : "·"} ${Math.abs(ch.delta).toFixed(2)} since ${ch.since}` : "NDVI") : metric("Health", "—", "waiting");
+    const y = f.yield;
+    const yld = y && y.bu_ac != null ? metric(`Yield ${y.year}`, `${Math.round(y.bu_ac)}`, "bu/ac") : metric("Yield", "—", y && y.method === "relative" ? "add expected" : "");
+    const fresh = img ? `${img.fresh ? "Image" : "Last image"} ${img.label}` : "Imagery on its way";
     return el("a", { class: `card fcard2 ${st[0]}`, href: `#/fields/${encodeURIComponent(f.id)}` },
-      el("div", { class: "row space" }, el("div", {}, el("b", { class: "fc-name", text: f.name }),
-        el("div", { class: "muted small", text: `${FM.fmt(f.area_ac, 0)} ac${f.crop ? " · " + f.crop : ""}${f.role === "viewer" ? " · shared with you" : ""}` })),
-        risk ? chip(`Disease: ${risk.level}`, `risk-${risk.level.toLowerCase()}`) : null),
-      el("div", {}, statusBadge(st)),
-      el("div", { class: "fc-row" }, miniRing(f.score), el("div", { class: "small" }, el("div", { text: scoreText }), health)),
-      trend ? el("div", { class: `fc-trend ${ch && ch.delta < -0.02 ? "down" : ""}` }, el("span", { class: "muted small", text: "Season so far" }), trend) : null,
-      f.yield && (f.yield.bu_ac != null || f.yield.method === "relative")
-        ? el("div", { class: "small fc-yield" }, el("span", { class: "muted", text: `Yield ${f.yield.year}: ` }),
-            f.yield.bu_ac != null
-              ? el("b", { text: `${Math.round(f.yield.bu_ac)} bu/ac` }) : el("span", { text: f.yield.label }),
-            f.yield.bu_ac != null && f.yield.method !== "harvest" ? el("span", { class: "muted", text: ` (${f.yield.low}–${f.yield.high}, ${f.yield.confidence})` }) : null)
-        : null,
-      f.timing && f.timing.headline && f.timing.headline !== f.headline && f.timing.status !== "no_crop"
-        ? el("div", { class: "small fc-timing" }, el("span", { class: "muted", text: "Next: " }), f.timing.headline) : null,
+      el("div", { class: "fc-top" },
+        el("div", { class: "fc-title" }, el("span", { class: "fc-name", text: f.name }),
+          el("span", { class: "fc-meta", text: `${FM.fmt(f.area_ac, 0)} ac${f.crop ? " · " + f.crop : ""}${f.role === "viewer" ? " · shared" : ""}` })),
+        statusBadge(st)),
       el("p", { class: "fc-head", text: f.headline }),
-      el("div", { class: `small ${img && !img.fresh ? "stale" : "muted"}`,
-        text: img ? (img.fresh ? `Latest image ${img.label} · ${img.age_days === 0 ? "today" : img.age_days === 1 ? "yesterday" : `${img.age_days} days ago`}`
-          : `Latest clear image ${img.label}: older than 2 weeks`) : "Imagery is on its way" }));
+      el("div", { class: "fc-metrics" }, score, health, yld),
+      el("div", { class: "fc-foot" }, trend ? el("div", { class: `fc-trend ${ch && ch.delta < -0.02 ? "down" : ""}` }, trend) : el("span"),
+        el("span", { class: `fc-fresh ${img && !img.fresh ? "stale" : ""}`, text: fresh })));
   }
+
 
   FM.views.today = async () => {
     const p = page("view-today");
