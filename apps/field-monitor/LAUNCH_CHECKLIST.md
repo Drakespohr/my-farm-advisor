@@ -16,8 +16,11 @@ provider's site before budgeting.**
 - [ ] Decide whether Photon (free OpenStreetMap suggestions, fair use) stays as the fallback or is
       self-hosted at higher volume.
 - [ ] Check the **Esri World Imagery** basemap terms for commercial use (the map's satellite tiles).
-- [ ] Crossroads search uses the public **Overpass API** (OpenStreetMap, fair use). At customer
-      volume, run our own Overpass instance or a paid provider and set `FIELD_MONITOR_OVERPASS_URL`.
+- [ ] Crossroads search is answered from our own US Census TIGER road index (instant, public domain);
+      the public **Overpass API** is only a fallback for areas not indexed yet. At customer volume,
+      pre-build the index for all served states, or run our own Overpass instance.
+- [ ] Search speed target: crossroads and field suggestions under 0.5 s. Measured: 12–23 ms for
+      ~60,000 indexed corners (6 counties); re-check on the production server.
 
 ## Rules to verify (they are TODO in the code, never guessed)
 

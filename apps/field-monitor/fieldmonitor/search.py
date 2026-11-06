@@ -410,15 +410,37 @@ def find_intersections(q: str, fields: list[dict[str, Any]], finder: Any, near: 
         return [], None
     items: list[dict[str, Any]] = []
     error: Optional[str] = None
+    # 1) Our own road index (US Census TIGER, built per county in the background): instant.
+    index = getattr(finder, "road_index", None)
+    if index is not None:
+        try:
+            items, pending = index.find(sides[0], sides[1], point, partial=partial)
+        except Exception as exc:
+            log.warning("road index lookup failed: %s", exc.__class__.__name__)
+            items, pending = [], []
+        if items:
+            for it in items:
+                it["fields_near"] = [m["id"] for m in match_fields("", fields, [(it["lat"], it["lon"])])]
+            return items, None
+        if pending:
+            error = "Downloading road names for this area (one time, about a minute); crossroads will be instant after that."
+        elif partial:
+            return [], None  # area indexed and nothing matches yet: don't wait on slow services while typing
     try:
         items = finder.find(q, point, partial=partial)
     except Exception as exc:  # never let a road lookup break search
         log.warning("intersection lookup failed: %s", exc.__class__.__name__)
-        error = f"Exact crossroads lookup (OpenStreetMap Overpass) isn't reachable ({exc.__class__.__name__})."
+        error = error or f"Exact crossroads lookup (OpenStreetMap Overpass) isn't reachable ({exc.__class__.__name__})."
     if not items and geocoder is not None:
         try:
-            roads_a = geocoder.photon_roads(sides[0], point)
-            roads_b = geocoder.photon_roads(sides[1], point)
+            from . import roads as rd
+
+            def keep(side: str, found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                q = rd.tokens(side)
+                return [r for r in found if rd.match_score(q, rd.tokens(r["name"]), partial) > 0]
+
+            roads_a = keep(sides[0], geocoder.photon_roads(sides[0], point))
+            roads_b = keep(sides[1], geocoder.photon_roads(sides[1], point))
             items = ix.approx_crossings(roads_a, roads_b, point)
             if not items:  # no crossing: offer the closest matches instead of nothing
                 items = ix.road_options(roads_a, roads_b, point)
