@@ -58,6 +58,13 @@ built, and main buttons. Tokens live at the top of `fieldmonitor/static/app.css`
 
 All text/background pairs meet WCAG AA (4.5:1 or better) in both modes.
 
+**Look and feel.** Luxurious but simple: restraint over decoration. One font family (Inter,
+vendored under `fieldmonitor/static/vendor/inter/`, OFL), generous spacing, clear type hierarchy.
+Depth comes from soft shadows (`--shadow-1`, `--shadow-2`) and thin dividers (`--hairline`), not boxes
+and borders. Teal and amber are used sparingly. The Today page shows one glance per field: name,
+status, one headline, Score / Health / Yield, a faint trend line, and the last image date. Dark mode
+keeps the same restraint.
+
 **Field status never relies on color alone.** Every status shows an icon and a word:
 ✓ **All clear** (teal), ⚠ **Scout today** (brick `#B4472B`), ◆ **Planting window open /
 Stand count due** (amber; spray windows will use it too), ◌ **Waiting for imagery** (gray).
@@ -297,6 +304,12 @@ cropland within 2 km, averaged over the images where nearby cropland was within 
 (QA "ok" images only). `k = 1` until calibrated; calibration fits `k` on your harvests (NDVI saturates,
 so `k` is usually above 1). Published Sentinel-2 field-scale models explain only about 25–60% of yield
 variation without local calibration, which is why recording harvests matters.
+
+**Ensemble weighting rule (decision, not built yet).** When the yield estimate combines several
+signals (NDVI, canopy volume, field counts, weather), no signal gets a fixed weight because it "should"
+matter more. "NDVI deserves a higher weight than canopy volume" is a hypothesis to test. Weights are set
+only from measured held-out error: hold out whole years and whole farms, never random field-days from a
+year the model has seen, and publish the held-out error next to the weights.
 
 Records (expected, harvest, count) are append-only in `fields/<id>/yields.jsonl`; the latest entry for a
 year wins. Only owners can add them; shared viewers see the estimate but not the records.
