@@ -203,52 +203,104 @@
   }
 
   // ---------- messages ----------------------------------------------------------
+  // Farm team group chats (one per farm) and direct messages. Direct messages stay within farm
+  // teams; marketplace listing chats are the exception. Routes: #/messages, #/messages/<conversation id>,
+  // #/messages/farm/<farm id>.
   let threadTimer = null;
-  FM.views.messages = async (convId) => {
+  FM.openDirect = async (userId) => {
+    const c = await api("/api/conversations", { method: "POST", body: JSON.stringify({ to_user_id: userId }) });
+    location.hash = `#/messages/${c.id}`;
+  };
+  FM.views.messages = async (arg) => {
     clearInterval(threadTimer);
+    const farmId = arg && arg.startsWith("farm/") ? arg.slice(5) : null;
+    const convId = farmId ? null : arg;
     const p = page("view-messages");
     const list = el("div", { class: "convlist" });
     const thread = el("div", { class: "thread card" });
-    p.append(el("div", { class: "page-head" }, el("h1", { text: "Messages" })), el("div", { class: `inbox ${convId ? "has-thread" : ""}` }, list, thread));
-    const convs = await api("/api/conversations");
-    if (!convs.length) list.append(el("p", { class: "muted", text: (FM.features || {}).marketplace ? "No messages yet. Contact someone from the Marketplace." : "No messages yet." }));
+    p.append(el("div", { class: "page-head" }, el("h1", { text: "Messages" })), el("div", { class: `inbox ${arg ? "has-thread" : ""}` }, list, thread));
+    const [chats, convs] = await Promise.all([api("/api/farm-chats"), api("/api/conversations")]);
+
+    const unreadBadge = (n, active) => (n && !active ? el("span", { class: "badge", text: String(n) }) : null);
+    if (chats.threads.length) list.append(el("div", { class: "convlist-label", text: "Farm teams" }));
+    for (const t of chats.threads) {
+      const active = t.farm_id === farmId;
+      list.append(el("a", { class: `conv ${active ? "active" : ""}`, href: `#/messages/farm/${encodeURIComponent(t.farm_id)}` },
+        el("span", { class: "avatar sm group", text: "◎", "aria-hidden": "true" }),
+        el("div", { class: "grow" },
+          el("div", { class: "row space" }, el("b", { text: t.farm_name }), unreadBadge(t.unread, active)),
+          el("div", { class: "small muted", text: `${t.members} ${t.members === 1 ? "person" : "people"} · team chat` }),
+          t.last_body ? el("div", { class: "small snippet", text: t.last_body }) : null)));
+    }
+
+    list.append(el("div", { class: "convlist-label", text: "Direct" }));
+    const talked = new Set(convs.map((c) => c.other_id));
+    const fresh = chats.teammates.filter((m) => !talked.has(m.user_id));
+    if (fresh.length) {
+      const pick = el("select", { "aria-label": "Message a teammate" }, el("option", { value: "", text: "＋ Message a teammate…" }),
+        fresh.map((m) => el("option", { value: m.user_id, text: `${m.display_name} (${m.farms.join(", ")})` })));
+      pick.addEventListener("change", () => { if (pick.value) FM.openDirect(pick.value); });
+      list.append(pick);
+    }
+    if (!convs.length) {
+      list.append(el("p", { class: "muted small", text: chats.teammates.length ? "No direct messages yet."
+        : "Add people to your farm team (Farm & team) to message them." }));
+    }
     for (const c of convs) {
-      list.append(el("a", { class: `conv ${c.id === convId ? "active" : ""}`, href: `#/messages/${c.id}` },
+      const active = c.id === convId;
+      list.append(el("a", { class: `conv ${active ? "active" : ""}`, href: `#/messages/${c.id}` },
         avatar(c.other_name, "sm"),
         el("div", { class: "grow" },
-          el("div", { class: "row space" }, el("b", { text: c.other_business || c.other_name }), c.unread && c.id !== convId ? el("span", { class: "badge", text: String(c.unread) }) : null),
+          el("div", { class: "row space" }, el("b", { text: c.other_business || c.other_name }), unreadBadge(c.unread, active)),
           c.listing_title ? el("div", { class: "small muted", text: `Re: ${c.listing_title}` }) : null,
           el("div", { class: "small snippet", text: c.last_body || "" }))));
     }
-    if (!convId) { thread.append(el("p", { class: "muted", text: "Pick a conversation." })); return; }
-    const draw = async () => {
-      const t = await api(`/api/conversations/${encodeURIComponent(convId)}/messages`);
-      thread.replaceChildren(
-        el("div", { class: "thread-head" },
-          el("a", { href: "#/messages", class: "only-mobile small", text: "← All" }),
+
+    if (!arg) { thread.append(el("p", { class: "muted", text: "Pick a conversation." })); return; }
+    const path = farmId ? `/api/farms/${encodeURIComponent(farmId)}/chat` : `/api/conversations/${encodeURIComponent(convId)}/messages`;
+    let lastCount = -1;
+    const draw = async (sent) => {
+      const t = sent || await api(path);
+      if (!sent && t.messages.length === lastCount) return; // nothing new: keep the draft and scroll position
+      lastCount = t.messages.length;
+      const back = el("a", { href: "#/messages", class: "only-mobile small", text: "← All" });
+      const head = farmId
+        ? el("div", { class: "thread-head" }, back, el("b", { text: `${t.farm_name} team` }),
+          el("span", { class: "small muted", text: t.members.map((m) => m.display_name || m.email).join(", ") }))
+        : el("div", { class: "thread-head" }, back,
           el("a", { href: `#/u/${encodeURIComponent(t.other.id)}` }, el("b", { text: t.other.business || t.other.name })),
-          t.listing ? el("a", { class: "small muted", href: `#/market/${t.listing.id}`, text: `Re: ${t.listing.title}` }) : null),
-        el("div", { class: "bubbles" }, ...t.messages.map((m) => el("div", { class: `bubble ${m.sender_id === t.me ? "mine" : ""}` },
-          el("div", { class: "prewrap", text: m.body }), el("div", { class: "time", text: when(m.created) })))),
-        compose());
+          t.listing ? el("a", { class: "small muted", href: `#/market/${t.listing.id}`, text: `Re: ${t.listing.title}` }) : null);
+      const bubbles = t.messages.length ? t.messages.map((m) => {
+        const mine = m.sender_id === t.me;
+        return el("div", { class: `bubble ${mine ? "mine" : ""}` },
+          farmId && !mine ? el("div", { class: "who", text: m.sender_name || "Someone" }) : null,
+          el("div", { class: "prewrap", text: m.body }), el("div", { class: "time", text: when(m.created) }));
+      }) : [el("p", { class: "muted small", text: farmId ? "Say something to the whole team." : "No messages yet." })];
+      const old = thread.querySelector("form.compose");
+      thread.replaceChildren(head, el("div", { class: "bubbles" }, ...bubbles), old || compose());
       const b = thread.querySelector(".bubbles");
       b.scrollTop = b.scrollHeight;
       FM.setMe(await api("/api/me"));
     };
     const compose = () => {
-      const ta = el("textarea", { rows: "2", maxlength: "4000", required: "", placeholder: "Write a message" });
-      const f = el("form", { class: "compose" }, ta, el("button", { class: "btn primary", type: "submit", text: "Send" }));
+      const ta = el("textarea", { rows: "2", maxlength: "4000", required: "", placeholder: farmId ? "Message the team" : "Write a message" });
+      const err = el("p", { class: "small", role: "status" });
+      const f = el("form", { class: "compose" }, ta, el("button", { class: "btn primary", type: "submit", text: "Send" }), err);
       f.addEventListener("submit", async (e) => {
         e.preventDefault();
         if (!ta.value.trim()) return;
-        await api(`/api/conversations/${encodeURIComponent(convId)}/messages`, { method: "POST", body: JSON.stringify({ body: ta.value }) });
-        draw();
+        try {
+          const t = await api(path, { method: "POST", body: JSON.stringify({ body: ta.value }) });
+          ta.value = ""; err.textContent = "";
+          draw(t);
+        } catch (ex) { err.textContent = ex.message; }
       });
-      ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) f.requestSubmit(); });
+      ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); f.requestSubmit(); } });
       return f;
     };
     await draw();
-    threadTimer = setInterval(() => { if (location.hash === `#/messages/${convId}` && !document.hidden && !thread.querySelector("textarea").value) draw(); }, 10000);
+    const here = location.hash;
+    threadTimer = setInterval(() => { if (location.hash === here && !document.hidden) draw().catch(() => {}); }, 5000);
   };
 
   function feedItem(it) {
@@ -511,10 +563,7 @@
         pr.location ? el("div", { class: "muted small", text: `📍 ${pr.location}` }) : null),
       data.is_me ? el("a", { class: "btn ghost", href: "#/me", text: "Edit profile" })
         : el("button", { class: "btn primary", type: "button", text: "Message", onclick: async () => {
-          const text = prompt(`Message ${pr.display_name}`);
-          if (!text) return;
-          const c = await api("/api/conversations", { method: "POST", body: JSON.stringify({ to_user_id: pr.id, body: text }) });
-          location.hash = `#/messages/${c.id}`;
+          try { await FM.openDirect(pr.id); } catch (err) { alert(err.message); }
         } }));
     p.append(head);
     if (pr.bio || pr.website || pr.phone) {

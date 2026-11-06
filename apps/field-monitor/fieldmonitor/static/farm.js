@@ -32,7 +32,8 @@
     }
 
     // Team
-    const team = el("section", { class: "card stack" }, el("h2", { text: "Team" }));
+    const team = el("section", { class: "card stack" }, el("div", { class: "row space" }, el("h2", { text: "Team" }),
+      el("a", { class: "btn ghost small-btn", href: `#/messages/farm/${encodeURIComponent(farm.id)}`, text: "Team chat" })));
     const list = el("div", { class: "team-list" });
     const tmsg = msgLine();
     const renderTeam = (members) => {
@@ -56,6 +57,10 @@
           row.append(sel, rm);
         } else {
           row.append(el("span", { class: "chip", text: m.role }));
+        }
+        if (m.user_id !== FM.state.me.user.id) {
+          row.append(el("button", { type: "button", class: "btn ghost small-btn", text: "Message",
+            onclick: () => FM.openDirect(m.user_id).catch((err) => { tmsg.textContent = err.message; }) }));
         }
         list.append(row);
       }
